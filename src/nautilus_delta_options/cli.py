@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import time
 from collections.abc import Sequence
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -41,6 +42,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         tuple(underlying_values),
     )
 
+    interval_seconds = cast(
+        int | None,
+        arguments.interval_seconds,
+    )
+
     store = SQLitePaperLedgerStore(database)
     session = PaperLedgerSession.load_or_create(
         store,
@@ -53,10 +59,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         session=session,
         underlyings=underlyings,
     )
-    cycle = observer.run_cycle()
+    if interval_seconds is None:
+        cycle = observer.run_cycle()
+        print(render_cycle_report(cycle, session.ledger))
+        return 0
 
-    print(render_cycle_report(cycle, session.ledger))
-    return 0
+    try:
+        while True:
+            cycle = observer.run_cycle()
+            print(
+                render_cycle_report(cycle, session.ledger),
+                flush=True,
+            )
+            print("\n" + "=" * 80, flush=True)
+            time.sleep(interval_seconds)
+    except KeyboardInterrupt:
+        return 0
 
 
 def render_cycle_report(
@@ -176,6 +194,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default=["BTC", "ETH"],
         help="Option underlyings to observe.",
     )
+    parser.add_argument(
+        "--interval-seconds",
+        type=_positive_int_argument,
+        default=None,
+        help=("Repeat observation using this interval; omit for one cycle."),
+    )
     return parser
 
 
@@ -187,5 +211,17 @@ def _decimal_argument(value: str) -> Decimal:
 
     if not result.is_finite():
         raise argparse.ArgumentTypeError("Decimal value must be finite")
+
+    return result
+
+
+def _positive_int_argument(value: str) -> int:
+    try:
+        result = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(f"Invalid integer value: {value}") from error
+
+    if result <= 0:
+        raise argparse.ArgumentTypeError("Value must be positive")
 
     return result

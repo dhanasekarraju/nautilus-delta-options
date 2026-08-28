@@ -79,15 +79,14 @@ class PaperDryRunObserver:
         as_of: date | None = None,
     ) -> PaperDryRunCycle:
         cycle_date = as_of or datetime.now(UTC).date()
-        captured_ns = time.time_ns()
         snapshots = tuple(
             self._fetch_snapshot(
                 underlying,
                 as_of=cycle_date,
-                captured_ns=captured_ns,
             )
             for underlying in self._underlyings
         )
+        captured_ns = max(snapshot.captured_ns for snapshot in snapshots)
         warnings = _snapshot_warnings(snapshots)
         records_by_product = {
             record.product.product_id: record
@@ -136,10 +135,15 @@ class PaperDryRunObserver:
         underlying: DeltaUnderlying,
         *,
         as_of: date,
-        captured_ns: int,
     ) -> DeltaMarketSnapshot:
         catalog = self._client.fetch_option_products(underlying)
         chain = self._client.fetch_option_chain(underlying)
+        received_ns = time.time_ns()
+        latest_event_ns = max(
+            (ticker.exchange_timestamp * 1_000 for ticker in chain.tickers),
+            default=received_ns,
+        )
+        captured_ns = max(received_ns, latest_event_ns)
 
         return build_market_snapshot(
             catalog=catalog,

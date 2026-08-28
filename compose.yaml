@@ -1,0 +1,56 @@
+name: nautilus-delta-options
+
+services:
+  observer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: nautilus-delta-options:0.1.0
+    container_name: nautilus-delta-options-observer
+    restart: unless-stopped
+    init: true
+
+    command:
+      - --database
+      - /data/paper-ledger.sqlite
+      - --initial-cash
+      - "${PAPER_INITIAL_CASH:-250}"
+      - --minimum-reward-risk
+      - "${MINIMUM_REWARD_RISK:-1.5}"
+      - --max-positions
+      - "${MAX_POSITIONS:-3}"
+      - --underlyings
+      - BTC
+      - ETH
+      - --interval-seconds
+      - "${OBSERVER_INTERVAL_SECONDS:-60}"
+
+    volumes:
+      - paper_data:/data
+
+    environment:
+      TZ: UTC
+      PYTHONUNBUFFERED: "1"
+
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+    pids_limit: 256
+    cpus: 1.0
+    mem_limit: 1g
+    stop_grace_period: 30s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  paper_data:

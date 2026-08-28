@@ -513,3 +513,27 @@ def test_observer_closes_and_persists_target_before_proposals(
     assert restored.open_positions == ()
     assert restored.closed_trades == cycle.closed_trades
     assert restored.cash == Decimal("101.810020000")
+
+
+def test_observer_never_initializes_before_exchange_event(
+    tmp_path: Path,
+) -> None:
+    future_timestamp_us = 2_000_000_000_000_000
+    store = SQLitePaperLedgerStore(tmp_path / "paper.sqlite")
+    session = PaperLedgerSession.load_or_create(
+        store,
+        initial_cash=Decimal("100"),
+        minimum_reward_risk=Decimal("1.5"),
+        max_positions=3,
+    )
+    observer = PaperDryRunObserver(
+        client=_StaticMarketClient(_ticker(timestamp_us=future_timestamp_us)),
+        session=session,
+        underlyings=("BTC",),
+    )
+
+    cycle = observer.run_cycle(as_of=AS_OF)
+
+    assert len(cycle.snapshots[0].records) == 1
+    assert cycle.snapshots[0].errors == ()
+    assert cycle.snapshots[0].captured_ns >= future_timestamp_us * 1_000
