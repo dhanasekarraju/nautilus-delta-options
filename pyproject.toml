@@ -1,0 +1,41 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nautilus-delta-options"
+version = "0.1.0"
+description = "Payoff-first BTC and ETH options dry-run engine for Delta Exchange India"
+requires-python = ">=3.12,<3.15"
+dependencies = [
+    "nautilus_trader==2.0.0rc3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3,<9",
+    "pytest-cov>=6,<7",
+    "ruff>=0.12,<1",
+    "mypy>=1.17,<2",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nautilus_delta_options"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-ra"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["nautilus_delta_options"]
+mypy_path = ["src"]
