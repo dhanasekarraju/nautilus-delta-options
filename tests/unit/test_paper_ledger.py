@@ -11,11 +11,17 @@ from nautilus_delta_options.delta.public_client import (
     DeltaOptionProductsSnapshot,
 )
 from nautilus_delta_options.delta.snapshot import (
+    DeltaMarketSnapshot,
     DeltaOptionMarketRecord,
     build_market_snapshot,
 )
 from nautilus_delta_options.paper.ledger import ExitReason, PaperLedger
 from nautilus_delta_options.paper.persistence import SQLitePaperLedgerStore
+from nautilus_delta_options.paper.proposals import (
+    build_paper_entry_proposal,
+    build_ranked_paper_entry_proposals,
+    plan_paper_exit_levels,
+)
 from nautilus_delta_options.paper.session import (
     PaperLedgerConfigurationError,
     PaperLedgerSession,
@@ -346,3 +352,65 @@ def test_persistent_session_saves_exit_automatically(
     assert restored.open_positions == ()
     assert restored.closed_trades == (closed,)
     assert restored.cash == Decimal("101.810020000")
+
+
+def test_plans_standard_call_exit_levels() -> None:
+    levels = plan_paper_exit_levels(_record())
+
+    assert levels.stop_exit_bid == Decimal("900")
+    assert levels.target_exit_bid == Decimal("1200")
+    assert levels.stop_spot == Decimal("79200")
+    assert levels.target_spot == Decimal("80800")
+
+
+def test_builds_payoff_approved_sized_proposal() -> None:
+    proposal = build_paper_entry_proposal(
+        _record(),
+        ledger=_ledger(),
+    )
+
+    assert proposal.sizing.approved is True
+    assert proposal.sizing.contracts == Decimal("16")
+    assert proposal.sizing.reward_risk_ratio >= Decimal("1.5")
+    assert proposal.sizing.total_planned_loss <= Decimal("2")
+    assert proposal.sizing.total_entry_debit <= Decimal("20")
+
+
+def test_proposal_preserves_net_payoff_gate() -> None:
+    proposal = build_paper_entry_proposal(
+        _record(),
+        ledger=_ledger("1.6"),
+    )
+
+    assert proposal.sizing.approved is False
+    assert proposal.sizing.contracts == Decimal("0")
+    assert proposal.sizing.reward_risk_ratio < Decimal("1.6")
+
+
+def test_ranked_proposals_exclude_open_product() -> None:
+    record = _record()
+    ledger = _ledger()
+    ledger.open_long(
+        record,
+        contracts=Decimal("10"),
+        stop_exit_bid=Decimal("900"),
+        target_exit_bid=Decimal("1200"),
+        stop_spot=Decimal("79500"),
+        target_spot=Decimal("81000"),
+    )
+    snapshot = DeltaMarketSnapshot(
+        underlying="BTC",
+        captured_ns=TIMESTAMP_US * 1_000,
+        product_count=1,
+        ticker_count=1,
+        records=(record,),
+        unmatched_product_ids=(),
+        errors=(),
+    )
+
+    proposals = build_ranked_paper_entry_proposals(
+        snapshot,
+        ledger=ledger,
+    )
+
+    assert proposals == ()
