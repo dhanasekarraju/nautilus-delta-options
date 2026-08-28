@@ -21,6 +21,10 @@ class PaperLedgerConfigurationError(ValueError):
     """Raised when runtime settings differ from persisted settings."""
 
 
+class PaperSignalAlreadyConsumedError(ValueError):
+    """Raised when a paper signal already produced an entry."""
+
+
 class PaperLedgerSession:
     """Coordinates paper-ledger mutations with durable persistence."""
 
@@ -85,6 +89,50 @@ class PaperLedgerSession:
         self._store.save(self._ledger)
         return position
 
+    def has_consumed_signal(self, signal_key: str) -> bool:
+        return self._store.has_consumed_signal(signal_key)
+
+    def open_long_for_signal(
+        self,
+        record: DeltaOptionMarketRecord,
+        *,
+        signal_key: str,
+        signal_underlying: str,
+        candle_closed_ns: int,
+        contracts: Decimal,
+        stop_exit_bid: Decimal,
+        target_exit_bid: Decimal,
+        stop_spot: Decimal,
+        target_spot: Decimal,
+    ) -> PaperPosition:
+        if record.ticker.underlying != signal_underlying:
+            raise ValueError("Signal underlying does not match the market record")
+        if self._store.has_consumed_signal(signal_key):
+            raise PaperSignalAlreadyConsumedError(f"Signal already consumed: {signal_key}")
+
+        candidate = _clone_ledger(self._ledger)
+        position = candidate.open_long(
+            record,
+            contracts=contracts,
+            stop_exit_bid=stop_exit_bid,
+            target_exit_bid=target_exit_bid,
+            stop_spot=stop_spot,
+            target_spot=target_spot,
+        )
+        receipt = self._store.save_with_signal(
+            candidate,
+            signal_key=signal_key,
+            underlying=signal_underlying,
+            candle_closed_ns=candle_closed_ns,
+            trade_id=position.trade_id,
+        )
+
+        if receipt is None:
+            raise PaperSignalAlreadyConsumedError(f"Signal already consumed: {signal_key}")
+
+        self._ledger = candidate
+        return position
+
     def process_exit(
         self,
         trade_id: int,
@@ -114,6 +162,19 @@ class PaperLedgerSession:
         )
         self._store.save(self._ledger)
         return closed_trade
+
+
+def _clone_ledger(ledger: PaperLedger) -> PaperLedger:
+    return PaperLedger.from_state(
+        initial_cash=ledger.initial_cash,
+        cash=ledger.cash,
+        minimum_reward_risk=ledger.minimum_reward_risk,
+        max_positions=ledger.max_positions,
+        gst_rate=ledger.gst_rate,
+        next_trade_id=ledger.next_trade_id,
+        open_positions=ledger.open_positions,
+        closed_trades=ledger.closed_trades,
+    )
 
 
 def _validate_configuration(

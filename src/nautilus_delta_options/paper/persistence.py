@@ -4,6 +4,7 @@ import json
 import sqlite3
 import time
 from collections.abc import Mapping
+from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import cast
@@ -16,6 +17,15 @@ from nautilus_delta_options.paper.ledger import (
 )
 
 _SCHEMA_VERSION = 1
+
+
+@dataclass(frozen=True, slots=True)
+class PaperSignalReceipt:
+    signal_key: str
+    underlying: str
+    candle_closed_ns: int
+    trade_id: int
+    consumed_ns: int
 
 
 class PaperLedgerPersistenceError(RuntimeError):
@@ -59,6 +69,122 @@ class SQLitePaperLedgerStore:
                 """,
                 (_SCHEMA_VERSION, payload, time.time_ns()),
             )
+
+    def has_consumed_signal(self, signal_key: str) -> bool:
+        _validate_signal_metadata(
+            signal_key=signal_key,
+            underlying="CHECK",
+            candle_closed_ns=1,
+            trade_id=1,
+        )
+
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT 1
+                FROM paper_signal_receipts
+                WHERE signal_key = ?
+                """,
+                (signal_key,),
+            ).fetchone()
+
+        return row is not None
+
+    def save_with_signal(
+        self,
+        ledger: PaperLedger,
+        *,
+        signal_key: str,
+        underlying: str,
+        candle_closed_ns: int,
+        trade_id: int,
+    ) -> PaperSignalReceipt | None:
+        _validate_signal_metadata(
+            signal_key=signal_key,
+            underlying=underlying,
+            candle_closed_ns=candle_closed_ns,
+            trade_id=trade_id,
+        )
+
+        position = next(
+            (candidate for candidate in ledger.open_positions if candidate.trade_id == trade_id),
+            None,
+        )
+        if position is None:
+            raise ValueError("Signal trade_id must identify an open position")
+        if position.underlying != underlying:
+            raise ValueError("Signal underlying does not match the position")
+
+        payload = json.dumps(
+            _ledger_to_payload(ledger),
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        consumed_ns = time.time_ns()
+        receipt = PaperSignalReceipt(
+            signal_key=signal_key,
+            underlying=underlying,
+            candle_closed_ns=candle_closed_ns,
+            trade_id=trade_id,
+            consumed_ns=consumed_ns,
+        )
+
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                """
+                SELECT 1
+                FROM paper_signal_receipts
+                WHERE signal_key = ?
+                """,
+                (signal_key,),
+            ).fetchone()
+
+            if existing is not None:
+                return None
+
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO paper_signal_receipts (
+                        signal_key,
+                        underlying,
+                        candle_closed_ns,
+                        trade_id,
+                        consumed_ns
+                    )
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        signal_key,
+                        underlying,
+                        candle_closed_ns,
+                        trade_id,
+                        consumed_ns,
+                    ),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO paper_ledger_state (
+                        id,
+                        schema_version,
+                        payload,
+                        updated_ns
+                    )
+                    VALUES (1, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        schema_version = excluded.schema_version,
+                        payload = excluded.payload,
+                        updated_ns = excluded.updated_ns
+                    """,
+                    (_SCHEMA_VERSION, payload, consumed_ns),
+                )
+            except sqlite3.IntegrityError as error:
+                raise PaperLedgerPersistenceError(
+                    "Signal receipt conflicts with persisted state"
+                ) from error
+
+        return receipt
 
     def load(self) -> PaperLedger | None:
         with self._connect() as connection:
@@ -106,6 +232,44 @@ class SQLitePaperLedgerStore:
                 )
                 """
             )
+
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS paper_signal_receipts (
+                    signal_key TEXT PRIMARY KEY,
+                    underlying TEXT NOT NULL,
+                    candle_closed_ns INTEGER NOT NULL
+                        CHECK (candle_closed_ns > 0),
+                    trade_id INTEGER NOT NULL UNIQUE
+                        CHECK (trade_id > 0),
+                    consumed_ns INTEGER NOT NULL
+                        CHECK (consumed_ns > 0)
+                )
+                """
+            )
+
+
+def _validate_signal_metadata(
+    *,
+    signal_key: str,
+    underlying: str,
+    candle_closed_ns: int,
+    trade_id: int,
+) -> None:
+    if not signal_key or signal_key.strip() != signal_key or len(signal_key) > 256:
+        raise ValueError("signal_key must be non-empty normalized text")
+
+    if not underlying or underlying.strip() != underlying or underlying.upper() != underlying:
+        raise ValueError("underlying must be non-empty uppercase text")
+
+    integer_fields = (
+        ("candle_closed_ns", candle_closed_ns),
+        ("trade_id", trade_id),
+    )
+
+    for name, value in integer_fields:
+        if isinstance(value, bool) or value <= 0:
+            raise ValueError(f"{name} must be a positive integer")
 
 
 def _ledger_to_payload(ledger: PaperLedger) -> dict[str, object]:

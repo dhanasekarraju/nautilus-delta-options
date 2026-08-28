@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 
+from nautilus_delta_options.delta.models import DeltaOptionContractType
 from nautilus_delta_options.delta.snapshot import (
     DeltaMarketSnapshot,
     DeltaOptionMarketRecord,
@@ -150,6 +151,7 @@ def build_ranked_paper_entry_proposals(
     *,
     ledger: PaperLedger,
     config: PaperProposalConfig | None = None,
+    contract_type: DeltaOptionContractType | None = None,
 ) -> tuple[PaperEntryProposal, ...]:
     resolved = config or PaperProposalConfig()
     available_slots = ledger.max_positions - len(ledger.open_positions)
@@ -164,6 +166,7 @@ def build_ranked_paper_entry_proposals(
             for record in snapshot.records
             if record.eligibility.eligible
             and record.quote is not None
+            and (contract_type is None or record.ticker.contract_type == contract_type)
             and record.product.product_id not in open_product_ids
         ),
         key=_execution_quality_key,

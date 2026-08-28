@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -18,6 +19,7 @@ from nautilus_delta_options.delta.snapshot import (
 from nautilus_delta_options.paper.ledger import ExitReason, PaperLedger
 from nautilus_delta_options.paper.observer import PaperDryRunObserver
 from nautilus_delta_options.paper.persistence import SQLitePaperLedgerStore
+from nautilus_delta_options.paper.portfolio_risk import PortfolioRiskConfig
 from nautilus_delta_options.paper.proposals import (
     build_paper_entry_proposal,
     build_ranked_paper_entry_proposals,
@@ -26,11 +28,22 @@ from nautilus_delta_options.paper.proposals import (
 from nautilus_delta_options.paper.session import (
     PaperLedgerConfigurationError,
     PaperLedgerSession,
+    PaperSignalAlreadyConsumedError,
+)
+from nautilus_delta_options.paper.signal_entries import (
+    PaperSignalEntryStatus,
+    process_v31_call_signal,
 )
 from nautilus_delta_options.selection.eligibility import EligibilityConfig
+from nautilus_delta_options.signals.v31 import (
+    V31CallSignal,
+    V31SignalDecision,
+)
 
 AS_OF = date(2026, 8, 28)
 TIMESTAMP_US = 1_787_878_544_804_095
+PAPER_SIGNAL_KEY = "BTC:1787887499999:call"
+PAPER_SIGNAL_CLOSED_NS = 1_787_887_499_999_000_000
 
 
 def _product() -> DeltaOptionProduct:
@@ -537,3 +550,350 @@ def test_observer_never_initializes_before_exchange_event(
     assert len(cycle.snapshots[0].records) == 1
     assert cycle.snapshots[0].errors == ()
     assert cycle.snapshots[0].captured_ns >= future_timestamp_us * 1_000
+
+
+def _paper_signal_session(
+    tmp_path: Path,
+) -> tuple[PaperLedgerSession, SQLitePaperLedgerStore]:
+    store = SQLitePaperLedgerStore(tmp_path / "paper.sqlite")
+    session = PaperLedgerSession.load_or_create(
+        store,
+        initial_cash=Decimal("100"),
+        minimum_reward_risk=Decimal("1.5"),
+        max_positions=3,
+    )
+    return session, store
+
+
+def test_signal_entry_atomically_persists_position_and_receipt(
+    tmp_path: Path,
+) -> None:
+    session, store = _paper_signal_session(tmp_path)
+
+    position = session.open_long_for_signal(
+        _record(),
+        signal_key=PAPER_SIGNAL_KEY,
+        signal_underlying="BTC",
+        candle_closed_ns=PAPER_SIGNAL_CLOSED_NS,
+        contracts=Decimal("10"),
+        stop_exit_bid=Decimal("900"),
+        target_exit_bid=Decimal("1200"),
+        stop_spot=Decimal("79500"),
+        target_spot=Decimal("81000"),
+    )
+
+    assert store.has_consumed_signal(PAPER_SIGNAL_KEY)
+    assert position.planned_loss > 0
+    assert position.planned_reward > 0
+    assert position.stop_spot == Decimal("79500")
+    assert position.target_spot == Decimal("81000")
+
+    restarted = PaperLedgerSession.load_or_create(
+        store,
+        initial_cash=Decimal("100"),
+        minimum_reward_risk=Decimal("1.5"),
+        max_positions=3,
+    )
+
+    assert restarted.ledger.open_positions == (position,)
+    assert restarted.has_consumed_signal(PAPER_SIGNAL_KEY)
+
+
+def test_duplicate_signal_does_not_mutate_session_ledger(
+    tmp_path: Path,
+) -> None:
+    session, store = _paper_signal_session(tmp_path)
+
+    position = session.open_long_for_signal(
+        _record(),
+        signal_key=PAPER_SIGNAL_KEY,
+        signal_underlying="BTC",
+        candle_closed_ns=PAPER_SIGNAL_CLOSED_NS,
+        contracts=Decimal("10"),
+        stop_exit_bid=Decimal("900"),
+        target_exit_bid=Decimal("1200"),
+        stop_spot=Decimal("79500"),
+        target_spot=Decimal("81000"),
+    )
+    cash_after_first_entry = session.ledger.cash
+
+    with pytest.raises(
+        PaperSignalAlreadyConsumedError,
+        match="already consumed",
+    ):
+        session.open_long_for_signal(
+            _record(),
+            signal_key=PAPER_SIGNAL_KEY,
+            signal_underlying="BTC",
+            candle_closed_ns=PAPER_SIGNAL_CLOSED_NS,
+            contracts=Decimal("10"),
+            stop_exit_bid=Decimal("900"),
+            target_exit_bid=Decimal("1200"),
+            stop_spot=Decimal("79500"),
+            target_spot=Decimal("81000"),
+        )
+
+    assert session.ledger.cash == cash_after_first_entry
+    assert session.ledger.open_positions == (position,)
+
+    restored = store.load()
+
+    assert restored is not None
+    assert restored.cash == cash_after_first_entry
+    assert restored.open_positions == (position,)
+
+
+def test_failed_signal_entry_is_not_consumed(
+    tmp_path: Path,
+) -> None:
+    session, store = _paper_signal_session(tmp_path)
+
+    with pytest.raises(ValueError, match="Expected stop"):
+        session.open_long_for_signal(
+            _record(),
+            signal_key=PAPER_SIGNAL_KEY,
+            signal_underlying="BTC",
+            candle_closed_ns=PAPER_SIGNAL_CLOSED_NS,
+            contracts=Decimal("10"),
+            stop_exit_bid=Decimal("900"),
+            target_exit_bid=Decimal("950"),
+            stop_spot=Decimal("79500"),
+            target_spot=Decimal("81000"),
+        )
+
+    assert not store.has_consumed_signal(PAPER_SIGNAL_KEY)
+    assert session.ledger.cash == Decimal("100")
+    assert session.ledger.open_positions == ()
+
+
+def test_signal_underlying_mismatch_is_not_consumed(
+    tmp_path: Path,
+) -> None:
+    session, store = _paper_signal_session(tmp_path)
+
+    with pytest.raises(ValueError, match="Signal underlying"):
+        session.open_long_for_signal(
+            _record(),
+            signal_key=PAPER_SIGNAL_KEY,
+            signal_underlying="ETH",
+            candle_closed_ns=PAPER_SIGNAL_CLOSED_NS,
+            contracts=Decimal("10"),
+            stop_exit_bid=Decimal("900"),
+            target_exit_bid=Decimal("1200"),
+            stop_spot=Decimal("79500"),
+            target_spot=Decimal("81000"),
+        )
+
+    assert not store.has_consumed_signal(PAPER_SIGNAL_KEY)
+    assert session.ledger.cash == Decimal("100")
+    assert session.ledger.open_positions == ()
+
+
+def _v31_signal(
+    *,
+    underlying: str = "BTC",
+    active: bool = True,
+) -> V31CallSignal:
+    return V31CallSignal(
+        underlying=underlying,
+        symbol=f"{underlying}USDT",
+        candle_open_ms=1_787_887_200_000,
+        candle_close_ms=1_787_887_499_999,
+        close_price=80000.0,
+        rsi=30.0 if active else 45.0,
+        ema20=80100.0 if active else 79900.0,
+        ema50=80000.0,
+        atr=200.0,
+        atr_pct=0.0025,
+        volume=100.0,
+        rsi_below_35=active,
+        ema20_above_ema50=active,
+        atr_pct_below_035=True,
+        positive_volume=True,
+        decision=(V31SignalDecision.CALL if active else V31SignalDecision.NONE),
+    )
+
+
+def _signal_snapshot(
+    record: DeltaOptionMarketRecord | None = None,
+) -> DeltaMarketSnapshot:
+    resolved = record or _record()
+
+    return DeltaMarketSnapshot(
+        underlying=resolved.ticker.underlying,
+        captured_ns=TIMESTAMP_US * 1_000,
+        product_count=1,
+        ticker_count=1,
+        records=(resolved,),
+        unmatched_product_ids=(),
+        errors=(),
+    )
+
+
+def _put_record() -> DeltaOptionMarketRecord:
+    call_record = _record()
+    symbol = "P-BTC-80000-300826"
+
+    return replace(
+        call_record,
+        product=replace(
+            call_record.product,
+            symbol=symbol,
+            contract_type="put_options",
+        ),
+        ticker=replace(
+            call_record.ticker,
+            symbol=symbol,
+            contract_type="put_options",
+            delta=Decimal("-0.5"),
+        ),
+    )
+
+
+def test_signal_entries_remain_disabled_without_opt_in(
+    tmp_path: Path,
+) -> None:
+    session, store = _paper_signal_session(tmp_path)
+    signal = _v31_signal()
+
+    result = process_v31_call_signal(
+        signal,
+        (_signal_snapshot(),),
+        session=session,
+        entries_enabled=False,
+    )
+
+    assert result.status is PaperSignalEntryStatus.DISABLED
+    assert result.position is None
+    assert session.ledger.open_positions == ()
+    assert not store.has_consumed_signal(signal.signal_key)
+
+
+def test_wait_signal_does_not_open_or_consume(
+    tmp_path: Path,
+) -> None:
+    session, store = _paper_signal_session(tmp_path)
+    signal = _v31_signal(active=False)
+
+    result = process_v31_call_signal(
+        signal,
+        (_signal_snapshot(),),
+        session=session,
+        entries_enabled=True,
+    )
+
+    assert result.status is PaperSignalEntryStatus.WAIT
+    assert result.position is None
+    assert session.ledger.open_positions == ()
+    assert not store.has_consumed_signal(signal.signal_key)
+
+
+def test_active_call_signal_opens_matching_call_atomically(
+    tmp_path: Path,
+) -> None:
+    session, store = _paper_signal_session(tmp_path)
+    signal = _v31_signal()
+
+    result = process_v31_call_signal(
+        signal,
+        (_signal_snapshot(),),
+        session=session,
+        entries_enabled=True,
+    )
+
+    assert result.status is PaperSignalEntryStatus.OPENED
+    assert result.position is not None
+    assert result.position.underlying == "BTC"
+    assert result.position.contract_type == "call_options"
+    assert result.proposal is not None
+    assert result.risk_decisions[-1].approved
+    assert session.ledger.open_positions == (result.position,)
+    assert store.has_consumed_signal(signal.signal_key)
+
+
+def test_consumed_call_signal_cannot_open_twice(
+    tmp_path: Path,
+) -> None:
+    session, store = _paper_signal_session(tmp_path)
+    signal = _v31_signal()
+    snapshots = (_signal_snapshot(),)
+
+    first = process_v31_call_signal(
+        signal,
+        snapshots,
+        session=session,
+        entries_enabled=True,
+    )
+    second = process_v31_call_signal(
+        signal,
+        snapshots,
+        session=session,
+        entries_enabled=True,
+    )
+
+    assert first.status is PaperSignalEntryStatus.OPENED
+    assert second.status is PaperSignalEntryStatus.ALREADY_CONSUMED
+    assert len(session.ledger.open_positions) == 1
+    assert store.has_consumed_signal(signal.signal_key)
+
+
+def test_portfolio_rejection_does_not_consume_signal(
+    tmp_path: Path,
+) -> None:
+    session, store = _paper_signal_session(tmp_path)
+    signal = _v31_signal()
+
+    result = process_v31_call_signal(
+        signal,
+        (_signal_snapshot(),),
+        session=session,
+        entries_enabled=True,
+        portfolio_config=PortfolioRiskConfig(
+            max_planned_loss_fraction=Decimal("0.001"),
+        ),
+    )
+
+    assert result.status is PaperSignalEntryStatus.RISK_REJECTED
+    assert result.position is None
+    assert result.risk_decisions
+    assert not result.risk_decisions[0].approved
+    assert session.ledger.open_positions == ()
+    assert not store.has_consumed_signal(signal.signal_key)
+
+
+def test_call_signal_never_selects_put_proposal(
+    tmp_path: Path,
+) -> None:
+    session, store = _paper_signal_session(tmp_path)
+    signal = _v31_signal()
+
+    result = process_v31_call_signal(
+        signal,
+        (_signal_snapshot(_put_record()),),
+        session=session,
+        entries_enabled=True,
+    )
+
+    assert result.status is PaperSignalEntryStatus.NO_CALL_PROPOSAL
+    assert result.position is None
+    assert session.ledger.open_positions == ()
+    assert not store.has_consumed_signal(signal.signal_key)
+
+
+def test_call_signal_requires_same_underlying_snapshot(
+    tmp_path: Path,
+) -> None:
+    session, store = _paper_signal_session(tmp_path)
+    signal = _v31_signal(underlying="ETH")
+
+    result = process_v31_call_signal(
+        signal,
+        (_signal_snapshot(),),
+        session=session,
+        entries_enabled=True,
+    )
+
+    assert result.status is PaperSignalEntryStatus.NO_MARKET_SNAPSHOT
+    assert result.position is None
+    assert session.ledger.open_positions == ()
+    assert not store.has_consumed_signal(signal.signal_key)
