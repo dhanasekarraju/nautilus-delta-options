@@ -1,5 +1,6 @@
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
@@ -14,6 +15,11 @@ from nautilus_delta_options.delta.snapshot import (
     build_market_snapshot,
 )
 from nautilus_delta_options.paper.ledger import ExitReason, PaperLedger
+from nautilus_delta_options.paper.persistence import SQLitePaperLedgerStore
+from nautilus_delta_options.paper.session import (
+    PaperLedgerConfigurationError,
+    PaperLedgerSession,
+)
 from nautilus_delta_options.selection.eligibility import EligibilityConfig
 
 AS_OF = date(2026, 8, 28)
@@ -227,3 +233,116 @@ def test_blocks_entry_when_maximum_positions_reached() -> None:
             stop_spot=Decimal("79500"),
             target_spot=Decimal("81000"),
         )
+
+
+def test_persistent_session_creates_and_reloads_wallet(
+    tmp_path: Path,
+) -> None:
+    store = SQLitePaperLedgerStore(tmp_path / "paper.sqlite")
+
+    created = PaperLedgerSession.load_or_create(
+        store,
+        initial_cash=Decimal("100"),
+        minimum_reward_risk=Decimal("1.5"),
+        max_positions=3,
+    )
+    restarted = PaperLedgerSession.load_or_create(
+        store,
+        initial_cash=Decimal("100"),
+        minimum_reward_risk=Decimal("1.5"),
+        max_positions=3,
+    )
+
+    assert created.ledger.cash == Decimal("100")
+    assert restarted.ledger.cash == Decimal("100")
+    assert restarted.ledger.next_trade_id == 1
+
+
+def test_persistent_session_rejects_configuration_change(
+    tmp_path: Path,
+) -> None:
+    store = SQLitePaperLedgerStore(tmp_path / "paper.sqlite")
+
+    PaperLedgerSession.load_or_create(
+        store,
+        initial_cash=Decimal("100"),
+        minimum_reward_risk=Decimal("1.5"),
+        max_positions=3,
+    )
+
+    with pytest.raises(
+        PaperLedgerConfigurationError,
+        match="minimum_reward_risk",
+    ):
+        PaperLedgerSession.load_or_create(
+            store,
+            initial_cash=Decimal("100"),
+            minimum_reward_risk=Decimal("2.0"),
+            max_positions=3,
+        )
+
+
+def test_persistent_session_saves_entry_automatically(
+    tmp_path: Path,
+) -> None:
+    store = SQLitePaperLedgerStore(tmp_path / "paper.sqlite")
+    session = PaperLedgerSession.load_or_create(
+        store,
+        initial_cash=Decimal("100"),
+        minimum_reward_risk=Decimal("1.5"),
+        max_positions=3,
+    )
+
+    position = session.open_long(
+        _record(),
+        contracts=Decimal("10"),
+        stop_exit_bid=Decimal("900"),
+        target_exit_bid=Decimal("1200"),
+        stop_spot=Decimal("79500"),
+        target_spot=Decimal("81000"),
+    )
+
+    restored = store.load()
+
+    assert restored is not None
+    assert restored.open_positions == (position,)
+    assert restored.cash == Decimal("89.905600000")
+    assert restored.next_trade_id == 2
+
+
+def test_persistent_session_saves_exit_automatically(
+    tmp_path: Path,
+) -> None:
+    store = SQLitePaperLedgerStore(tmp_path / "paper.sqlite")
+    session = PaperLedgerSession.load_or_create(
+        store,
+        initial_cash=Decimal("100"),
+        minimum_reward_risk=Decimal("1.5"),
+        max_positions=3,
+    )
+    position = session.open_long(
+        _record(),
+        contracts=Decimal("10"),
+        stop_exit_bid=Decimal("900"),
+        target_exit_bid=Decimal("1200"),
+        stop_spot=Decimal("79500"),
+        target_spot=Decimal("81000"),
+    )
+
+    closed = session.process_exit(
+        position.trade_id,
+        _record(
+            bid="1200",
+            ask="1210",
+            spot="81000",
+            timestamp_us=TIMESTAMP_US + 1,
+        ),
+    )
+    restored = store.load()
+
+    assert closed is not None
+    assert closed.reason == ExitReason.TARGET
+    assert restored is not None
+    assert restored.open_positions == ()
+    assert restored.closed_trades == (closed,)
+    assert restored.cash == Decimal("101.810020000")
