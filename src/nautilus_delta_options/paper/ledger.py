@@ -104,6 +104,65 @@ class PaperLedger:
             Decimal("0"),
         )
 
+    @property
+    def minimum_reward_risk(self) -> Decimal:
+        return self._minimum_reward_risk
+
+    @property
+    def max_positions(self) -> int:
+        return self._max_positions
+
+    @property
+    def gst_rate(self) -> Decimal:
+        return self._gst_rate
+
+    @property
+    def next_trade_id(self) -> int:
+        return self._next_trade_id
+
+    @classmethod
+    def from_state(
+        cls,
+        *,
+        initial_cash: Decimal,
+        cash: Decimal,
+        minimum_reward_risk: Decimal,
+        max_positions: int,
+        gst_rate: Decimal,
+        next_trade_id: int,
+        open_positions: tuple[PaperPosition, ...],
+        closed_trades: tuple[PaperClosedTrade, ...],
+    ) -> "PaperLedger":
+        if cash < 0:
+            raise ValueError("cash cannot be negative")
+        if next_trade_id <= 0:
+            raise ValueError("next_trade_id must be positive")
+        if len(open_positions) > max_positions:
+            raise ValueError("Open positions exceed max_positions")
+
+        trade_ids = [position.trade_id for position in open_positions] + [
+            trade.position.trade_id for trade in closed_trades
+        ]
+
+        if any(trade_id <= 0 for trade_id in trade_ids):
+            raise ValueError("Trade IDs must be positive")
+        if len(trade_ids) != len(set(trade_ids)):
+            raise ValueError("Trade IDs must be unique")
+        if next_trade_id <= max(trade_ids, default=0):
+            raise ValueError("next_trade_id must exceed existing trade IDs")
+
+        ledger = cls(
+            initial_cash=initial_cash,
+            minimum_reward_risk=minimum_reward_risk,
+            max_positions=max_positions,
+            gst_rate=gst_rate,
+        )
+        ledger._cash = cash
+        ledger._next_trade_id = next_trade_id
+        ledger._positions = {position.trade_id: position for position in open_positions}
+        ledger._closed_trades = list(closed_trades)
+        return ledger
+
     def open_long(
         self,
         record: DeltaOptionMarketRecord,
