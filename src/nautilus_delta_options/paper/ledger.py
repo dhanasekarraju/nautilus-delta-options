@@ -57,12 +57,15 @@ class PaperLedger:
         *,
         initial_cash: Decimal,
         minimum_reward_risk: Decimal,
+        max_positions: int,
         gst_rate: Decimal | None = None,
     ) -> None:
         if initial_cash <= 0:
             raise ValueError("initial_cash must be positive")
         if minimum_reward_risk <= 0:
             raise ValueError("minimum_reward_risk must be positive")
+        if max_positions <= 0:
+            raise ValueError("max_positions must be positive")
 
         if gst_rate is None:
             gst_rate = Decimal("0.18")
@@ -72,6 +75,7 @@ class PaperLedger:
         self._initial_cash = initial_cash
         self._cash = initial_cash
         self._minimum_reward_risk = minimum_reward_risk
+        self._max_positions = max_positions
         self._gst_rate = gst_rate
         self._next_trade_id = 1
         self._positions: dict[int, PaperPosition] = {}
@@ -116,6 +120,8 @@ class PaperLedger:
             raise ValueError("Market record has no executable quote")
         if contracts <= 0 or contracts != contracts.to_integral_value():
             raise ValueError("contracts must be a positive whole number")
+        if len(self._positions) >= self._max_positions:
+            raise ValueError("Maximum open positions reached")
         if any(
             position.product_id == record.product.product_id
             for position in self._positions.values()

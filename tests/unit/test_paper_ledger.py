@@ -120,6 +120,7 @@ def _ledger(minimum: str = "1.5") -> PaperLedger:
     return PaperLedger(
         initial_cash=Decimal("100"),
         minimum_reward_risk=Decimal(minimum),
+        max_positions=3,
     )
 
 
@@ -199,3 +200,30 @@ def test_target_exit_credits_net_proceeds() -> None:
     assert ledger.cash == Decimal("101.810020000")
     assert ledger.realized_pnl == Decimal("1.810020000")
     assert ledger.open_positions == ()
+
+
+def test_blocks_entry_when_maximum_positions_reached() -> None:
+    ledger = PaperLedger(
+        initial_cash=Decimal("250"),
+        minimum_reward_risk=Decimal("1.5"),
+        max_positions=1,
+    )
+
+    ledger.open_long(
+        _record(),
+        contracts=Decimal("10"),
+        stop_exit_bid=Decimal("900"),
+        target_exit_bid=Decimal("1200"),
+        stop_spot=Decimal("79500"),
+        target_spot=Decimal("81000"),
+    )
+
+    with pytest.raises(ValueError, match="Maximum open positions"):
+        ledger.open_long(
+            _record(),
+            contracts=Decimal("10"),
+            stop_exit_bid=Decimal("900"),
+            target_exit_bid=Decimal("1200"),
+            stop_spot=Decimal("79500"),
+            target_spot=Decimal("81000"),
+        )
