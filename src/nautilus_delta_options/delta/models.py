@@ -32,7 +32,7 @@ class DeltaOptionTicker:
     rho: Decimal | None
     vega: Decimal | None
     open_interest_contracts: Decimal
-    volume: Decimal
+    volume: Decimal | None
     exchange_timestamp: int
     trading_status: str
 
@@ -105,7 +105,7 @@ class DeltaOptionTicker:
                 raw.get("oi_contracts"),
                 "oi_contracts",
             ),
-            volume=_decimal(raw.get("volume"), "volume"),
+            volume=_optional_decimal(raw.get("volume"), "volume"),
             exchange_timestamp=_integer(raw.get("timestamp"), "timestamp"),
             trading_status=_string(
                 raw.get("product_trading_status"),

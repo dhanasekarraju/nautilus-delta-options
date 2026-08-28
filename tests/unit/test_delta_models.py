@@ -73,3 +73,13 @@ def test_rejects_unknown_contract_type() -> None:
 
     with pytest.raises(ValueError, match="Unsupported contract_type"):
         DeltaOptionTicker.from_api(raw)
+
+
+def test_null_volume_is_preserved_without_rejecting_quote() -> None:
+    raw = _sample_ticker()
+    raw["volume"] = None
+
+    ticker = DeltaOptionTicker.from_api(raw)
+
+    assert ticker.volume is None
+    assert ticker.has_tradeable_quote is True
