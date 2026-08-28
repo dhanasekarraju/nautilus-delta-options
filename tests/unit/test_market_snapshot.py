@@ -114,6 +114,7 @@ def test_builds_joined_market_snapshot() -> None:
 
     record = snapshot.records[0]
     assert str(record.instrument.id) == "P-BTC-94000-301026.DELTA"
+    assert record.quote is not None
     assert str(record.quote.bid_price) == "14209.0"
     assert record.greeks.delta == pytest.approx(-0.8479)
 
@@ -144,3 +145,23 @@ def test_rejects_underlying_snapshot_mismatch() -> None:
             captured_ns=TIMESTAMP_NS,
             eligibility_config=EligibilityConfig(),
         )
+
+
+def test_retains_ineligible_ticker_without_tradeable_quote() -> None:
+    ticker = replace(_ticker(), best_bid=None)
+
+    snapshot = build_market_snapshot(
+        catalog=_catalog(_product()),
+        chain=_chain(ticker),
+        as_of=AS_OF,
+        captured_ns=TIMESTAMP_NS,
+        eligibility_config=EligibilityConfig(
+            min_dte=1,
+            max_dte=90,
+        ),
+    )
+
+    assert len(snapshot.records) == 1
+    assert snapshot.records[0].quote is None
+    assert snapshot.records[0].eligibility.eligible is False
+    assert snapshot.errors == ()

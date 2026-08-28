@@ -29,7 +29,7 @@ class DeltaOptionMarketRecord:
     product: DeltaOptionProduct
     ticker: DeltaOptionTicker
     instrument: CryptoOption
-    quote: QuoteTick
+    quote: QuoteTick | None
     greeks: OptionGreeks
     eligibility: EligibilityResult
 
@@ -99,10 +99,14 @@ def build_market_snapshot(
                 ts_event_ns=captured_ns,
                 ts_init_ns=captured_ns,
             )
-            quote = map_delta_ticker_to_quote_tick(
-                ticker,
-                instrument,
-                ts_init_ns=captured_ns,
+            quote = (
+                map_delta_ticker_to_quote_tick(
+                    ticker,
+                    instrument,
+                    ts_init_ns=captured_ns,
+                )
+                if ticker.has_tradeable_quote
+                else None
             )
             greeks = map_delta_ticker_to_option_greeks(
                 ticker,
