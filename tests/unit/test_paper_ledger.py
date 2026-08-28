@@ -16,6 +16,7 @@ from nautilus_delta_options.delta.snapshot import (
     build_market_snapshot,
 )
 from nautilus_delta_options.paper.ledger import ExitReason, PaperLedger
+from nautilus_delta_options.paper.observer import PaperDryRunObserver
 from nautilus_delta_options.paper.persistence import SQLitePaperLedgerStore
 from nautilus_delta_options.paper.proposals import (
     build_paper_entry_proposal,
@@ -414,3 +415,101 @@ def test_ranked_proposals_exclude_open_product() -> None:
     )
 
     assert proposals == ()
+
+
+class _StaticMarketClient:
+    def __init__(self, ticker: DeltaOptionTicker) -> None:
+        self._ticker = ticker
+
+    def fetch_option_products(
+        self,
+        underlying: object,
+    ) -> DeltaOptionProductsSnapshot:
+        assert underlying == "BTC"
+        return DeltaOptionProductsSnapshot(
+            underlying="BTC",
+            products=(_product(),),
+            rejected_records=(),
+        )
+
+    def fetch_option_chain(
+        self,
+        underlying: object,
+    ) -> DeltaOptionChainSnapshot:
+        assert underlying == "BTC"
+        return DeltaOptionChainSnapshot(
+            underlying="BTC",
+            tickers=(self._ticker,),
+            rejected_records=(),
+        )
+
+
+def test_observer_builds_proposal_without_opening_trade(
+    tmp_path: Path,
+) -> None:
+    store = SQLitePaperLedgerStore(tmp_path / "paper.sqlite")
+    session = PaperLedgerSession.load_or_create(
+        store,
+        initial_cash=Decimal("100"),
+        minimum_reward_risk=Decimal("1.5"),
+        max_positions=3,
+    )
+    observer = PaperDryRunObserver(
+        client=_StaticMarketClient(_ticker()),
+        session=session,
+        underlyings=("BTC",),
+    )
+
+    cycle = observer.run_cycle(as_of=AS_OF)
+
+    assert len(cycle.snapshots) == 1
+    assert cycle.closed_trades == ()
+    assert cycle.warnings == ()
+    assert len(cycle.proposals) == 1
+    assert cycle.proposals[0].sizing.approved is True
+    assert cycle.proposals[0].sizing.contracts == Decimal("16")
+    assert session.ledger.open_positions == ()
+
+
+def test_observer_closes_and_persists_target_before_proposals(
+    tmp_path: Path,
+) -> None:
+    store = SQLitePaperLedgerStore(tmp_path / "paper.sqlite")
+    session = PaperLedgerSession.load_or_create(
+        store,
+        initial_cash=Decimal("100"),
+        minimum_reward_risk=Decimal("1.5"),
+        max_positions=3,
+    )
+    position = session.open_long(
+        _record(),
+        contracts=Decimal("10"),
+        stop_exit_bid=Decimal("900"),
+        target_exit_bid=Decimal("1200"),
+        stop_spot=Decimal("79500"),
+        target_spot=Decimal("81000"),
+    )
+    observer = PaperDryRunObserver(
+        client=_StaticMarketClient(
+            _ticker(
+                bid="1200",
+                ask="1210",
+                spot="81000",
+                timestamp_us=TIMESTAMP_US + 1,
+            )
+        ),
+        session=session,
+        underlyings=("BTC",),
+    )
+
+    cycle = observer.run_cycle(as_of=AS_OF)
+    restored = store.load()
+
+    assert len(cycle.closed_trades) == 1
+    assert cycle.closed_trades[0].position.trade_id == (position.trade_id)
+    assert cycle.closed_trades[0].reason == ExitReason.TARGET
+    assert cycle.proposals == ()
+    assert restored is not None
+    assert restored.open_positions == ()
+    assert restored.closed_trades == cycle.closed_trades
+    assert restored.cash == Decimal("101.810020000")
