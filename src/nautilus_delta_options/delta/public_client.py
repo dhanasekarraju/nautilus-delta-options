@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Literal, cast
 
 from nautilus_delta_options.delta.models import DeltaOptionTicker
+from nautilus_delta_options.delta.product import DeltaOptionProduct
 
 type DeltaUnderlying = Literal["BTC", "ETH"]
 
@@ -19,6 +20,13 @@ class DeltaOptionChainSnapshot:
     @property
     def tradeable_tickers(self) -> tuple[DeltaOptionTicker, ...]:
         return tuple(ticker for ticker in self.tickers if ticker.has_tradeable_quote)
+
+
+@dataclass(frozen=True, slots=True)
+class DeltaOptionProductsSnapshot:
+    underlying: DeltaUnderlying
+    products: tuple[DeltaOptionProduct, ...]
+    rejected_records: tuple[str, ...]
 
 
 class DeltaPublicClient:
@@ -40,13 +48,35 @@ class DeltaPublicClient:
         self,
         underlying: DeltaUnderlying,
     ) -> DeltaOptionChainSnapshot:
+        payload = self._fetch_options_payload(
+            path="/v2/tickers",
+            underlying=underlying,
+        )
+        return parse_option_chain_payload(payload, underlying=underlying)
+
+    def fetch_option_products(
+        self,
+        underlying: DeltaUnderlying,
+    ) -> DeltaOptionProductsSnapshot:
+        payload = self._fetch_options_payload(
+            path="/v2/products",
+            underlying=underlying,
+        )
+        return parse_option_products_payload(payload, underlying=underlying)
+
+    def _fetch_options_payload(
+        self,
+        *,
+        path: str,
+        underlying: DeltaUnderlying,
+    ) -> object:
         params = urllib.parse.urlencode(
             {
                 "contract_types": "call_options,put_options",
                 "underlying_asset_symbols": underlying,
             },
         )
-        url = f"{self._base_url}/v2/tickers?{params}"
+        url = f"{self._base_url}{path}?{params}"
 
         request = urllib.request.Request(
             url,
@@ -60,9 +90,7 @@ class DeltaPublicClient:
             request,
             timeout=self._timeout_seconds,
         ) as response:
-            payload = cast(object, json.load(response))
-
-        return parse_option_chain_payload(payload, underlying=underlying)
+            return cast(object, json.load(response))
 
 
 def parse_option_chain_payload(
@@ -70,22 +98,12 @@ def parse_option_chain_payload(
     *,
     underlying: DeltaUnderlying,
 ) -> DeltaOptionChainSnapshot:
-    if not isinstance(payload, Mapping):
-        raise ValueError("Delta response must be an object")
-
-    response = cast(Mapping[str, object], payload)
-
-    if response.get("success") is not True:
-        raise ValueError("Delta response indicated failure")
-
-    raw_result = response.get("result")
-    if not isinstance(raw_result, list):
-        raise ValueError("Delta response result must be a list")
+    raw_records = _response_records(payload)
 
     tickers: list[DeltaOptionTicker] = []
     rejected_records: list[str] = []
 
-    for index, raw_record in enumerate(raw_result):
+    for index, raw_record in enumerate(raw_records):
         if not isinstance(raw_record, Mapping):
             rejected_records.append(f"record {index}: must be an object")
             continue
@@ -109,3 +127,55 @@ def parse_option_chain_payload(
         tickers=tuple(tickers),
         rejected_records=tuple(rejected_records),
     )
+
+
+def parse_option_products_payload(
+    payload: object,
+    *,
+    underlying: DeltaUnderlying,
+) -> DeltaOptionProductsSnapshot:
+    raw_records = _response_records(payload)
+
+    products: list[DeltaOptionProduct] = []
+    rejected_records: list[str] = []
+
+    for index, raw_record in enumerate(raw_records):
+        if not isinstance(raw_record, Mapping):
+            rejected_records.append(f"record {index}: must be an object")
+            continue
+
+        try:
+            product = DeltaOptionProduct.from_api(
+                cast(Mapping[str, object], raw_record),
+            )
+            if product.underlying != underlying:
+                raise ValueError(
+                    f"expected underlying {underlying}, got {product.underlying}",
+                )
+        except ValueError as exc:
+            rejected_records.append(f"record {index}: {exc}")
+            continue
+
+        products.append(product)
+
+    return DeltaOptionProductsSnapshot(
+        underlying=underlying,
+        products=tuple(products),
+        rejected_records=tuple(rejected_records),
+    )
+
+
+def _response_records(payload: object) -> list[object]:
+    if not isinstance(payload, Mapping):
+        raise ValueError("Delta response must be an object")
+
+    response = cast(Mapping[str, object], payload)
+
+    if response.get("success") is not True:
+        raise ValueError("Delta response indicated failure")
+
+    raw_result = response.get("result")
+    if not isinstance(raw_result, list):
+        raise ValueError("Delta response result must be a list")
+
+    return cast(list[object], raw_result)
