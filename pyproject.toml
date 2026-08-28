@@ -9,6 +9,10 @@ description = "Payoff-first BTC and ETH options dry-run engine for Delta Exchang
 requires-python = ">=3.12,<3.15"
 dependencies = [
     "nautilus_trader==2.0.0rc3",
+    "numpy>=2.0,<3",
+    "TA-Lib>=0.6,<1",
+    "fastapi>=0.116,<1",
+    "uvicorn>=0.35,<1",
 ]
 
 [project.optional-dependencies]
