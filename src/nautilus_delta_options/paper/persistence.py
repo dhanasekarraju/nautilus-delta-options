@@ -139,6 +139,10 @@ def _position_to_payload(position: PaperPosition) -> dict[str, object]:
         "target_price": str(position.target_price),
         "planned_reward_risk": str(position.planned_reward_risk),
         "opened_ns": position.opened_ns,
+        "stop_spot": str(position.stop_spot),
+        "target_spot": str(position.target_spot),
+        "planned_loss": str(position.planned_loss),
+        "planned_reward": str(position.planned_reward),
     }
 
 
@@ -208,6 +212,26 @@ def _position_from_payload(value: object) -> PaperPosition:
             "planned_reward_risk",
         ),
         opened_ns=_require_int(payload, "opened_ns"),
+        stop_spot=_require_optional_decimal(
+            payload,
+            "stop_spot",
+            default=_require_decimal(payload, "entry_spot"),
+        ),
+        target_spot=_require_optional_decimal(
+            payload,
+            "target_spot",
+            default=_require_decimal(payload, "entry_spot"),
+        ),
+        planned_loss=_require_optional_decimal(
+            payload,
+            "planned_loss",
+            default=_require_decimal(payload, "entry_debit"),
+        ),
+        planned_reward=_require_optional_decimal(
+            payload,
+            "planned_reward",
+            default=Decimal("0"),
+        ),
     )
 
 
@@ -284,6 +308,17 @@ def _require_decimal(
         raise PaperLedgerPersistenceError(f"Persisted {key} must be finite")
 
     return result
+
+
+def _require_optional_decimal(
+    payload: Mapping[str, object],
+    key: str,
+    *,
+    default: Decimal,
+) -> Decimal:
+    if key not in payload:
+        return default
+    return _require_decimal(payload, key)
 
 
 def _require_list(

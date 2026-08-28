@@ -37,6 +37,10 @@ class PaperPosition:
     target_price: Decimal
     planned_reward_risk: Decimal
     opened_ns: int
+    stop_spot: Decimal = Decimal("0")
+    target_spot: Decimal = Decimal("0")
+    planned_loss: Decimal = Decimal("0")
+    planned_reward: Decimal = Decimal("0")
 
 
 @dataclass(frozen=True, slots=True)
@@ -248,6 +252,10 @@ class PaperLedger:
             target_price=target_exit_bid,
             planned_reward_risk=payoff.reward_risk_ratio,
             opened_ns=record.quote.ts_event,
+            stop_spot=stop_spot,
+            target_spot=target_spot,
+            planned_loss=payoff.planned_loss,
+            planned_reward=payoff.planned_reward,
         )
 
         self._cash -= entry_debit
