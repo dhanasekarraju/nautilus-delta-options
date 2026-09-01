@@ -16,6 +16,7 @@ from nautilus_delta_options.delta.snapshot import (
     DeltaOptionMarketRecord,
     build_market_snapshot,
 )
+from nautilus_delta_options.paper.exit_policy import PaperExitPolicyConfig
 from nautilus_delta_options.paper.ledger import ExitReason, PaperLedger
 from nautilus_delta_options.paper.observer import PaperDryRunObserver
 from nautilus_delta_options.paper.persistence import SQLitePaperLedgerStore
@@ -35,6 +36,10 @@ from nautilus_delta_options.paper.signal_entries import (
     process_v31_call_signal,
 )
 from nautilus_delta_options.selection.eligibility import EligibilityConfig
+from nautilus_delta_options.selection.entry_safety import (
+    EntrySafetyReason,
+    evaluate_option_entry_safety,
+)
 from nautilus_delta_options.signals.v31 import (
     V31CallSignal,
     V31SignalDecision,
@@ -42,6 +47,7 @@ from nautilus_delta_options.signals.v31 import (
 
 AS_OF = date(2026, 8, 28)
 TIMESTAMP_US = 1_787_878_544_804_095
+TIMESTAMP_NS = TIMESTAMP_US * 1_000
 PAPER_SIGNAL_KEY = "BTC:1787887499999:call"
 PAPER_SIGNAL_CLOSED_NS = 1_787_887_499_999_000_000
 
@@ -401,6 +407,50 @@ def test_proposal_preserves_net_payoff_gate() -> None:
     assert proposal.sizing.reward_risk_ratio < Decimal("1.6")
 
 
+def test_default_option_entry_safety_accepts_liquid_atm_contract() -> None:
+    result = evaluate_option_entry_safety(
+        _record(),
+        observed_ns=TIMESTAMP_NS + 1,
+    )
+
+    assert result.approved
+    assert result.reasons == ()
+
+
+def test_option_entry_safety_rejects_bad_delta_and_moneyness() -> None:
+    record = _record(spot="60000")
+    record = replace(
+        record,
+        ticker=replace(record.ticker, delta=Decimal("0.10")),
+    )
+
+    result = evaluate_option_entry_safety(
+        record,
+        observed_ns=TIMESTAMP_NS + 1,
+    )
+
+    assert not result.approved
+    assert EntrySafetyReason.DELTA_OUT_OF_RANGE in result.reasons
+    assert EntrySafetyReason.MONEYNESS_TOO_WIDE in result.reasons
+    with pytest.raises(ValueError, match="delta_out_of_range"):
+        build_paper_entry_proposal(record, ledger=_ledger())
+
+
+def test_option_entry_safety_rejects_stale_quote_and_near_expiry() -> None:
+    stale = evaluate_option_entry_safety(
+        _record(),
+        observed_ns=TIMESTAMP_NS + 16_000_000_000,
+    )
+    settlement_ns = int(_product().settlement_time.timestamp()) * 1_000_000_000
+    near_expiry = evaluate_option_entry_safety(
+        _record(),
+        observed_ns=settlement_ns - 35 * 3_600_000_000_000,
+    )
+
+    assert EntrySafetyReason.STALE_QUOTE in stale.reasons
+    assert EntrySafetyReason.TOO_CLOSE_TO_SETTLEMENT in near_expiry.reasons
+
+
 def test_ranked_proposals_exclude_open_product() -> None:
     record = _record()
     ledger = _ledger()
@@ -471,6 +521,7 @@ def test_observer_builds_proposal_without_opening_trade(
         client=_StaticMarketClient(_ticker()),
         session=session,
         underlyings=("BTC",),
+        clock_ns=lambda: TIMESTAMP_NS + 1,
     )
 
     cycle = observer.run_cycle(as_of=AS_OF)
@@ -513,6 +564,7 @@ def test_observer_closes_and_persists_target_before_proposals(
         ),
         session=session,
         underlyings=("BTC",),
+        clock_ns=lambda: TIMESTAMP_NS + 1_001,
     )
 
     cycle = observer.run_cycle(as_of=AS_OF)
@@ -528,7 +580,45 @@ def test_observer_closes_and_persists_target_before_proposals(
     assert restored.cash == Decimal("101.810020000")
 
 
-def test_observer_never_initializes_before_exchange_event(
+def test_observer_forces_time_exit_and_persists_it(
+    tmp_path: Path,
+) -> None:
+    store = SQLitePaperLedgerStore(tmp_path / "paper.sqlite")
+    session = PaperLedgerSession.load_or_create(
+        store,
+        initial_cash=Decimal("100"),
+        minimum_reward_risk=Decimal("1.5"),
+        max_positions=3,
+    )
+    position = session.open_long(
+        _record(),
+        contracts=Decimal("10"),
+        stop_exit_bid=Decimal("900"),
+        target_exit_bid=Decimal("1200"),
+        stop_spot=Decimal("79500"),
+        target_spot=Decimal("81000"),
+    )
+    exit_timestamp_us = TIMESTAMP_US + 241 * 60 * 1_000_000
+    observer = PaperDryRunObserver(
+        client=_StaticMarketClient(_ticker(timestamp_us=exit_timestamp_us)),
+        session=session,
+        underlyings=("BTC",),
+        exit_policy_config=PaperExitPolicyConfig(max_hold_minutes=240),
+        clock_ns=lambda: exit_timestamp_us * 1_000 + 1,
+    )
+
+    cycle = observer.run_cycle(as_of=AS_OF)
+    restored = store.load()
+
+    assert len(cycle.closed_trades) == 1
+    assert cycle.closed_trades[0].position.trade_id == position.trade_id
+    assert cycle.closed_trades[0].reason is ExitReason.TIME
+    assert restored is not None
+    assert restored.open_positions == ()
+    assert restored.closed_trades == cycle.closed_trades
+
+
+def test_observer_rejects_exchange_event_ahead_of_local_clock(
     tmp_path: Path,
 ) -> None:
     future_timestamp_us = 2_000_000_000_000_000
@@ -543,13 +633,11 @@ def test_observer_never_initializes_before_exchange_event(
         client=_StaticMarketClient(_ticker(timestamp_us=future_timestamp_us)),
         session=session,
         underlyings=("BTC",),
+        clock_ns=lambda: TIMESTAMP_NS,
     )
 
-    cycle = observer.run_cycle(as_of=AS_OF)
-
-    assert len(cycle.snapshots[0].records) == 1
-    assert cycle.snapshots[0].errors == ()
-    assert cycle.snapshots[0].captured_ns >= future_timestamp_us * 1_000
+    with pytest.raises(ValueError, match="ahead of the VPS clock"):
+        observer.run_cycle(as_of=AS_OF)
 
 
 def _paper_signal_session(
@@ -788,6 +876,26 @@ def test_wait_signal_does_not_open_or_consume(
     assert not store.has_consumed_signal(signal.signal_key)
 
 
+def test_stale_call_signal_does_not_open_or_consume(
+    tmp_path: Path,
+) -> None:
+    session, store = _paper_signal_session(tmp_path)
+    signal = _v31_signal()
+
+    result = process_v31_call_signal(
+        signal,
+        (_signal_snapshot(),),
+        session=session,
+        entries_enabled=True,
+        observed_ns=PAPER_SIGNAL_CLOSED_NS + 361_000_000_000,
+    )
+
+    assert result.status is PaperSignalEntryStatus.STALE_SIGNAL
+    assert result.position is None
+    assert session.ledger.open_positions == ()
+    assert not store.has_consumed_signal(signal.signal_key)
+
+
 def test_active_call_signal_opens_matching_call_atomically(
     tmp_path: Path,
 ) -> None:
@@ -897,3 +1005,80 @@ def test_call_signal_requires_same_underlying_snapshot(
     assert result.position is None
     assert session.ledger.open_positions == ()
     assert not store.has_consumed_signal(signal.signal_key)
+
+
+class _StaticSignalClient:
+    def fetch_v31_candles(self, underlying: object) -> object:
+        assert underlying == "BTC"
+        return object()
+
+
+def _install_static_call_signal(
+    monkeypatch: pytest.MonkeyPatch,
+    signal: V31CallSignal,
+) -> None:
+    def fake_evaluate(_: object) -> V31CallSignal:
+        return signal
+
+    monkeypatch.setattr(
+        "nautilus_delta_options.paper.observer.evaluate_v31_call_signal",
+        fake_evaluate,
+    )
+
+
+def test_observer_entry_mode_defaults_to_disabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session, store = _paper_signal_session(tmp_path)
+    signal = _v31_signal()
+    _install_static_call_signal(monkeypatch, signal)
+    observer = PaperDryRunObserver(
+        client=_StaticMarketClient(_ticker(timestamp_us=signal.candle_close_ms * 1_000)),
+        session=session,
+        underlyings=("BTC",),
+        signal_client=_StaticSignalClient(),
+        clock_ns=lambda: PAPER_SIGNAL_CLOSED_NS,
+    )
+
+    cycle = observer.run_cycle(as_of=AS_OF)
+
+    assert not observer.entries_enabled
+    assert not cycle.entries_enabled
+    assert cycle.signals == (signal,)
+    assert len(cycle.entry_results) == 1
+    assert cycle.entry_results[0].status is PaperSignalEntryStatus.DISABLED
+    assert session.ledger.open_positions == ()
+    assert not store.has_consumed_signal(signal.signal_key)
+
+
+def test_observer_enabled_mode_opens_once_per_signal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session, store = _paper_signal_session(tmp_path)
+    signal = _v31_signal()
+    _install_static_call_signal(monkeypatch, signal)
+    observer = PaperDryRunObserver(
+        client=_StaticMarketClient(_ticker(timestamp_us=signal.candle_close_ms * 1_000)),
+        session=session,
+        underlyings=("BTC",),
+        signal_client=_StaticSignalClient(),
+        entries_enabled=True,
+        clock_ns=lambda: PAPER_SIGNAL_CLOSED_NS,
+    )
+
+    first_cycle = observer.run_cycle(as_of=AS_OF)
+    second_cycle = observer.run_cycle(as_of=AS_OF)
+
+    assert observer.entries_enabled
+    assert first_cycle.entries_enabled
+    assert first_cycle.entry_results[0].status is PaperSignalEntryStatus.OPENED
+    assert second_cycle.entry_results[0].status is PaperSignalEntryStatus.ALREADY_CONSUMED
+    assert len(session.ledger.open_positions) == 1
+    assert store.has_consumed_signal(signal.signal_key)
+
+    restored = store.load()
+
+    assert restored is not None
+    assert restored.open_positions == session.ledger.open_positions

@@ -20,6 +20,7 @@ from nautilus_delta_options.paper.persistence import (
     SQLitePaperLedgerStore,
 )
 from nautilus_delta_options.paper.session import PaperLedgerSession
+from nautilus_delta_options.signals.binance import BinanceFuturesPublicClient
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -42,6 +43,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         tuple(underlying_values),
     )
 
+    paper_entries_enabled = cast(
+        bool,
+        arguments.paper_entries_enabled,
+    )
+
     interval_seconds = cast(
         int | None,
         arguments.interval_seconds,
@@ -58,6 +64,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         client=DeltaPublicClient(),
         session=session,
         underlyings=underlyings,
+        signal_client=BinanceFuturesPublicClient(),
+        entries_enabled=paper_entries_enabled,
     )
     if interval_seconds is None:
         cycle = observer.run_cycle()
@@ -83,7 +91,11 @@ def render_cycle_report(
 ) -> str:
     lines = [
         "NAUTILUS DELTA OPTIONS",
-        "MODE: PAPER OBSERVER — ENTRIES DISABLED",
+        (
+            "MODE: PAPER CALL ENTRIES ENABLED"
+            if cycle.entries_enabled
+            else "MODE: PAPER OBSERVER — ENTRIES DISABLED"
+        ),
         f"Cycle date: {cycle.as_of.isoformat()}",
         "",
         "PAPER WALLET",
@@ -110,7 +122,11 @@ def render_cycle_report(
     lines.extend(
         (
             "",
-            "PROPOSALS ONLY — NO ENTRIES",
+            (
+                "PAYOFF-APPROVED MARKET CANDIDATES"
+                if cycle.entries_enabled
+                else "PROPOSALS ONLY — NO ENTRIES"
+            ),
         )
     )
 
@@ -199,6 +215,14 @@ def _build_parser() -> argparse.ArgumentParser:
         type=_positive_int_argument,
         default=None,
         help=("Repeat observation using this interval; omit for one cycle."),
+    )
+    parser.add_argument(
+        "--paper-entries-enabled",
+        action="store_true",
+        help=(
+            "Enable V3.1 CALL-driven virtual paper entries. "
+            "This never submits real exchange orders."
+        ),
     )
     return parser
 

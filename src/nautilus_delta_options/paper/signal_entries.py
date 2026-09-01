@@ -22,6 +22,7 @@ from nautilus_delta_options.paper.session import (
     PaperLedgerSession,
     PaperSignalAlreadyConsumedError,
 )
+from nautilus_delta_options.selection.entry_safety import signal_is_fresh
 from nautilus_delta_options.signals.v31 import V31CallSignal
 
 
@@ -32,6 +33,7 @@ class PaperSignalEntryStatus(StrEnum):
     NO_MARKET_SNAPSHOT = "no_market_snapshot"
     NO_CALL_PROPOSAL = "no_call_proposal"
     RISK_REJECTED = "risk_rejected"
+    STALE_SIGNAL = "stale_signal"
     OPENED = "opened"
 
 
@@ -52,6 +54,7 @@ def process_v31_call_signal(
     entries_enabled: bool,
     proposal_config: PaperProposalConfig | None = None,
     portfolio_config: PortfolioRiskConfig | None = None,
+    observed_ns: int | None = None,
 ) -> PaperSignalEntryResult:
     if not entries_enabled:
         return PaperSignalEntryResult(
@@ -94,10 +97,32 @@ def process_v31_call_signal(
             risk_decisions=(),
         )
 
+    resolved_proposal_config = proposal_config or PaperProposalConfig()
+    resolved_observed_ns = (
+        observed_ns
+        if observed_ns is not None
+        else max(
+            snapshot.captured_ns,
+            signal.candle_close_ms * 1_000_000,
+        )
+    )
+    if not signal_is_fresh(
+        candle_close_ms=signal.candle_close_ms,
+        observed_ns=resolved_observed_ns,
+        config=resolved_proposal_config.entry_safety,
+    ):
+        return PaperSignalEntryResult(
+            status=PaperSignalEntryStatus.STALE_SIGNAL,
+            signal=signal,
+            proposal=None,
+            position=None,
+            risk_decisions=(),
+        )
+
     proposals = build_ranked_paper_entry_proposals(
         snapshot,
         ledger=session.ledger,
-        config=proposal_config,
+        config=resolved_proposal_config,
         contract_type="call_options",
     )
 
@@ -169,6 +194,7 @@ def process_v31_call_signals(
     entries_enabled: bool,
     proposal_config: PaperProposalConfig | None = None,
     portfolio_config: PortfolioRiskConfig | None = None,
+    observed_ns: int | None = None,
 ) -> tuple[PaperSignalEntryResult, ...]:
     return tuple(
         process_v31_call_signal(
@@ -178,6 +204,7 @@ def process_v31_call_signals(
             entries_enabled=entries_enabled,
             proposal_config=proposal_config,
             portfolio_config=portfolio_config,
+            observed_ns=observed_ns,
         )
         for signal in signals
     )

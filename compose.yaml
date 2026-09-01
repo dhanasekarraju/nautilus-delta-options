@@ -1,29 +1,30 @@
 name: nautilus-delta-options
 
 services:
-  observer:
+  dashboard:
     build:
       context: .
       dockerfile: Dockerfile
     image: nautilus-delta-options:0.1.0
-    container_name: nautilus-delta-options-observer
+    container_name: nautilus-delta-options-dashboard
     restart: unless-stopped
     init: true
 
+    entrypoint:
+      - python
+      - -m
+      - uvicorn
+
     command:
-      - --database
-      - /data/paper-ledger.sqlite
-      - --initial-cash
-      - "${PAPER_INITIAL_CASH:-250}"
-      - --minimum-reward-risk
-      - "${MINIMUM_REWARD_RISK:-1.5}"
-      - --max-positions
-      - "${MAX_POSITIONS:-3}"
-      - --underlyings
-      - BTC
-      - ETH
-      - --interval-seconds
-      - "${OBSERVER_INTERVAL_SECONDS:-60}"
+      - nautilus_delta_options.web.app:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --no-access-log
+
+    ports:
+      - "127.0.0.1:8000:8000"
 
     volumes:
       - paper_data:/data
@@ -31,6 +32,12 @@ services:
     environment:
       TZ: UTC
       PYTHONUNBUFFERED: "1"
+      PAPER_DATABASE: /data/paper-ledger.sqlite
+      PAPER_INITIAL_CASH: "${PAPER_INITIAL_CASH:-250}"
+      MINIMUM_REWARD_RISK: "${MINIMUM_REWARD_RISK:-1.5}"
+      MAX_POSITIONS: "${MAX_POSITIONS:-3}"
+      OBSERVER_INTERVAL_SECONDS: "${OBSERVER_INTERVAL_SECONDS:-60}"
+      PAPER_ENTRIES_ENABLED: "${PAPER_ENTRIES_ENABLED:-false}"
 
     read_only: true
     tmpfs:

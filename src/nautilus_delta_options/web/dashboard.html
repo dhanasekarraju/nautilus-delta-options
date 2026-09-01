@@ -349,6 +349,12 @@
       .metrics { grid-template-columns: 1fr 1fr; }
       .metric:last-child { grid-column: 1 / -1; }
     }
+    .badge.entries-on {
+      color: #ffd166;
+      border-color: rgba(255, 209, 102, 0.55);
+      background: rgba(255, 209, 102, 0.10);
+      box-shadow: 0 0 18px rgba(255, 209, 102, 0.08);
+    }
   </style>
 </head>
 <body>
@@ -363,7 +369,7 @@
           <span id="status-dot" class="dot"></span>
           <span id="status-text">Loading</span>
         </span>
-        <span class="badge safe">ENTRIES DISABLED</span>
+        <span id="entry-mode" class="badge safe">ENTRIES DISABLED</span>
       </div>
     </header>
 
@@ -529,6 +535,15 @@
       const ready = data.status === "ready";
       el("status-text").textContent = ready ? "Observer live" : data.status;
       el("status-dot").className = `dot ${ready ? "ready" : data.status === "error" ? "error" : ""}`;
+
+      const entriesEnabled = Boolean(data.entries_enabled);
+      const entryMode = el("entry-mode");
+      entryMode.textContent = entriesEnabled
+        ? "PAPER ENTRIES ENABLED"
+        : "ENTRIES DISABLED";
+      entryMode.className = `badge ${
+        entriesEnabled ? "entries-on" : "safe"
+      }`;
 
       const message = el("message");
       message.classList.toggle("hidden", ready);

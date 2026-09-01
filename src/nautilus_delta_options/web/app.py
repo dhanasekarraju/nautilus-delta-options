@@ -33,10 +33,10 @@ _DASHBOARD_PATH = Path(__file__).with_name("dashboard.html")
 
 
 class DashboardState:
-    def __init__(self) -> None:
+    def __init__(self, entries_enabled: bool = False) -> None:
         self.payload: dict[str, object] = {
             "status": "loading",
-            "entries_enabled": False,
+            "entries_enabled": entries_enabled,
             "updated_at": None,
             "message": "Waiting for the first Delta market cycle.",
         }
@@ -46,6 +46,7 @@ def create_app(
     *,
     database: Path | None = None,
     interval_seconds: int | None = None,
+    entries_enabled: bool | None = None,
 ) -> FastAPI:
     resolved_database = database or Path(
         os.getenv(
@@ -56,6 +57,11 @@ def create_app(
     resolved_interval = interval_seconds or _integer_env(
         "OBSERVER_INTERVAL_SECONDS",
         60,
+    )
+    resolved_entries_enabled = (
+        entries_enabled
+        if entries_enabled is not None
+        else _boolean_env("PAPER_ENTRIES_ENABLED", False)
     )
     store = SQLitePaperLedgerStore(resolved_database)
     session = PaperLedgerSession.load_or_create(
@@ -73,19 +79,21 @@ def create_app(
             3,
         ),
     )
+    signal_client = BinanceFuturesPublicClient()
     observer = PaperDryRunObserver(
         client=DeltaPublicClient(),
         session=session,
+        signal_client=signal_client,
+        entries_enabled=resolved_entries_enabled,
     )
-    signal_client = BinanceFuturesPublicClient()
-    state = DashboardState()
+    state = DashboardState(resolved_entries_enabled)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         polling_task = asyncio.create_task(
             _poll_dashboard(
                 observer=observer,
-                ledger=session.ledger,
+                session=session,
                 state=state,
                 interval_seconds=resolved_interval,
             )
@@ -140,7 +148,7 @@ def create_app(
                 "status",
                 "unknown",
             ),
-            "entries_enabled": False,
+            "entries_enabled": observer.entries_enabled,
         }
 
     return application
@@ -149,7 +157,7 @@ def create_app(
 async def _poll_dashboard(
     *,
     observer: PaperDryRunObserver,
-    ledger: PaperLedger,
+    session: PaperLedgerSession,
     state: DashboardState,
     interval_seconds: int,
 ) -> None:
@@ -158,14 +166,14 @@ async def _poll_dashboard(
             cycle = await asyncio.to_thread(observer.run_cycle)
             state.payload = _dashboard_payload(
                 cycle,
-                ledger,
+                session.ledger,
             )
         except asyncio.CancelledError:
             raise
         except Exception as error:
             state.payload = {
                 "status": "error",
-                "entries_enabled": False,
+                "entries_enabled": observer.entries_enabled,
                 "updated_at": datetime.now(UTC).isoformat(),
                 "message": str(error),
             }
@@ -179,7 +187,7 @@ def _dashboard_payload(
 ) -> dict[str, object]:
     return {
         "status": "ready",
-        "entries_enabled": False,
+        "entries_enabled": cycle.entries_enabled,
         "updated_at": datetime.now(UTC).isoformat(),
         "cycle_date": cycle.as_of.isoformat(),
         "wallet": {
@@ -311,6 +319,24 @@ def _decimal_env(
         raise ValueError(f"{name} must be finite")
 
     return result
+
+
+def _boolean_env(
+    name: str,
+    default: bool,
+) -> bool:
+    raw_value = os.getenv(
+        name,
+        "true" if default else "false",
+    )
+    normalized = raw_value.strip().lower()
+
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+
+    raise ValueError(f"{name} must be a boolean value")
 
 
 def _integer_env(

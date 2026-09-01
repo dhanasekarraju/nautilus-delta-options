@@ -14,6 +14,10 @@ from nautilus_delta_options.paper.sizing import (
     PositionSizingDecision,
     size_long_option_position,
 )
+from nautilus_delta_options.selection.entry_safety import (
+    EntrySafetyConfig,
+    evaluate_option_entry_safety,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,6 +27,7 @@ class PaperProposalConfig:
     spot_move_fraction: Decimal = Decimal("0.01")
     max_proposals: int = 3
     sizing: PositionSizingConfig = field(default_factory=PositionSizingConfig)
+    entry_safety: EntrySafetyConfig = field(default_factory=EntrySafetyConfig)
 
     def __post_init__(self) -> None:
         if not 0 < self.stop_premium_fraction < 1:
@@ -117,6 +122,17 @@ def build_paper_entry_proposal(
         raise ValueError("Maximum open positions reached")
     if any(position.product_id == record.product.product_id for position in ledger.open_positions):
         raise ValueError("An open position already exists for this product")
+    if record.quote is None:
+        raise ValueError("A current tradeable quote is required")
+
+    safety = evaluate_option_entry_safety(
+        record,
+        observed_ns=record.quote.ts_init,
+        config=resolved.entry_safety,
+    )
+    if not safety.approved:
+        reasons = ", ".join(reason.value for reason in safety.reasons)
+        raise ValueError(f"Trade rejected by entry safety gate: {reasons}")
 
     levels = plan_paper_exit_levels(
         record,
@@ -168,6 +184,11 @@ def build_ranked_paper_entry_proposals(
             and record.quote is not None
             and (contract_type is None or record.ticker.contract_type == contract_type)
             and record.product.product_id not in open_product_ids
+            and evaluate_option_entry_safety(
+                record,
+                observed_ns=record.quote.ts_init,
+                config=resolved.entry_safety,
+            ).approved
         ),
         key=_execution_quality_key,
     )
