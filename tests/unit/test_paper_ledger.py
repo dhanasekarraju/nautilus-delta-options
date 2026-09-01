@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -17,6 +18,7 @@ from nautilus_delta_options.delta.snapshot import (
     build_market_snapshot,
 )
 from nautilus_delta_options.paper.exit_policy import PaperExitPolicyConfig
+from nautilus_delta_options.paper.fast_exit import run_fast_exit_cycle
 from nautilus_delta_options.paper.ledger import ExitReason, PaperLedger
 from nautilus_delta_options.paper.observer import PaperDryRunObserver
 from nautilus_delta_options.paper.persistence import SQLitePaperLedgerStore
@@ -1313,3 +1315,132 @@ def test_session_ledger_returns_detached_snapshot(
 
     assert before_entry is not after_entry
     assert after_entry is not session.ledger
+
+
+
+class _StubFastExitClient:
+    def __init__(
+        self,
+        tickers: tuple[DeltaOptionTicker, ...],
+    ) -> None:
+        self._tickers_by_symbol = {
+            ticker.symbol: ticker
+            for ticker in tickers
+        }
+        self.calls: list[tuple[str, ...]] = []
+
+    def fetch_option_tickers(
+        self,
+        symbols: Sequence[str],
+    ) -> tuple[DeltaOptionTicker, ...]:
+        requested = tuple(symbols)
+        self.calls.append(requested)
+
+        return tuple(
+            self._tickers_by_symbol[symbol]
+            for symbol in requested
+            if symbol in self._tickers_by_symbol
+        )
+
+
+def test_fast_exit_cycle_skips_market_call_without_positions(
+    tmp_path: Path,
+) -> None:
+    session = PaperLedgerSession.load_or_create(
+        SQLitePaperLedgerStore(tmp_path / "paper.sqlite"),
+        initial_cash=Decimal("100"),
+        minimum_reward_risk=Decimal("1.5"),
+        max_positions=3,
+    )
+    client = _StubFastExitClient(())
+
+    cycle = run_fast_exit_cycle(
+        client=client,
+        session=session,
+    )
+
+    assert cycle.checked_positions == 0
+    assert cycle.closed_trades == ()
+    assert cycle.warnings == ()
+    assert client.calls == []
+
+
+def test_fast_exit_cycle_closes_stop_at_current_bid(
+    tmp_path: Path,
+) -> None:
+    session = PaperLedgerSession.load_or_create(
+        SQLitePaperLedgerStore(tmp_path / "paper.sqlite"),
+        initial_cash=Decimal("100"),
+        minimum_reward_risk=Decimal("1.5"),
+        max_positions=3,
+    )
+
+    position = session.open_long(
+        _record(),
+        contracts=Decimal("10"),
+        stop_exit_bid=Decimal("900"),
+        target_exit_bid=Decimal("1200"),
+        stop_spot=Decimal("79500"),
+        target_spot=Decimal("81000"),
+    )
+
+    exit_ticker = _ticker(
+        bid="880",
+        ask="890",
+        spot="79000",
+        timestamp_us=TIMESTAMP_US + 1,
+    )
+    client = _StubFastExitClient((exit_ticker,))
+
+    cycle = run_fast_exit_cycle(
+        client=client,
+        session=session,
+    )
+
+    assert cycle.checked_positions == 1
+    assert len(cycle.closed_trades) == 1
+    assert cycle.closed_trades[0].reason == ExitReason.STOP
+    assert cycle.closed_trades[0].exit_price == Decimal("880")
+    assert cycle.warnings == ()
+    assert client.calls == [(position.symbol,)]
+    assert session.ledger.open_positions == ()
+
+
+def test_fast_exit_cycle_leaves_position_open_inside_exit_band(
+    tmp_path: Path,
+) -> None:
+    session = PaperLedgerSession.load_or_create(
+        SQLitePaperLedgerStore(tmp_path / "paper.sqlite"),
+        initial_cash=Decimal("100"),
+        minimum_reward_risk=Decimal("1.5"),
+        max_positions=3,
+    )
+
+    position = session.open_long(
+        _record(),
+        contracts=Decimal("10"),
+        stop_exit_bid=Decimal("900"),
+        target_exit_bid=Decimal("1200"),
+        stop_spot=Decimal("79500"),
+        target_spot=Decimal("81000"),
+    )
+
+    client = _StubFastExitClient(
+        (
+            _ticker(
+                bid="950",
+                ask="960",
+                timestamp_us=TIMESTAMP_US + 1,
+            ),
+        )
+    )
+
+    cycle = run_fast_exit_cycle(
+        client=client,
+        session=session,
+    )
+
+    assert cycle.checked_positions == 1
+    assert cycle.closed_trades == ()
+    assert cycle.warnings == ()
+    assert session.ledger.open_positions == (position,)
