@@ -307,6 +307,8 @@ def _position_to_payload(position: PaperPosition) -> dict[str, object]:
         "target_spot": str(position.target_spot),
         "planned_loss": str(position.planned_loss),
         "planned_reward": str(position.planned_reward),
+        "taker_fee": str(position.taker_fee),
+        "premium_cap_rate": str(position.premium_cap_rate),
     }
 
 
@@ -395,6 +397,16 @@ def _position_from_payload(value: object) -> PaperPosition:
             payload,
             "planned_reward",
             default=Decimal("0"),
+        ),
+        taker_fee=_require_optional_decimal(
+            payload,
+            "taker_fee",
+            default=Decimal("0.0001"),
+        ),
+        premium_cap_rate=_require_optional_decimal(
+            payload,
+            "premium_cap_rate",
+            default=Decimal("0.035"),
         ),
     )
 

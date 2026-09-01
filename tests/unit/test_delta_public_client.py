@@ -1,4 +1,9 @@
-from nautilus_delta_options.delta.public_client import parse_option_chain_payload
+import pytest
+
+from nautilus_delta_options.delta.public_client import (
+    parse_option_chain_payload,
+    parse_option_tickers_payload,
+)
 
 
 def _valid_ticker() -> dict[str, object]:
@@ -77,3 +82,67 @@ def test_rejects_mismatched_underlying() -> None:
     assert snapshot.tickers == ()
     assert len(snapshot.rejected_records) == 1
     assert "expected underlying BTC, got ETH" in snapshot.rejected_records[0]
+
+
+def test_parses_single_symbol_ticker_response() -> None:
+    ticker = _valid_ticker()
+
+    tickers = parse_option_tickers_payload(
+        {
+            "success": True,
+            "result": ticker,
+        },
+        expected_symbols=(str(ticker["symbol"]),),
+    )
+
+    assert len(tickers) == 1
+    assert tickers[0].symbol == ticker["symbol"]
+    assert tickers[0].product_id == ticker["product_id"]
+
+
+def test_parses_multiple_symbol_ticker_response_in_requested_order() -> None:
+    btc = _valid_ticker()
+    eth = _valid_ticker()
+
+    eth["product_id"] = 147897
+    eth["symbol"] = "C-ETH-2450-040926"
+    eth["underlying_asset_symbol"] = "ETH"
+    eth["contract_type"] = "call_options"
+    eth["strike_price"] = "2450"
+    eth["spot_price"] = "2447.9"
+    eth["contract_value"] = "0.01"
+
+    tickers = parse_option_tickers_payload(
+        {
+            "success": True,
+            "result": [eth, btc],
+        },
+        expected_symbols=(
+            str(btc["symbol"]),
+            str(eth["symbol"]),
+        ),
+    )
+
+    assert [ticker.symbol for ticker in tickers] == [
+        btc["symbol"],
+        eth["symbol"],
+    ]
+
+
+def test_rejects_missing_requested_ticker() -> None:
+    btc = _valid_ticker()
+
+    with pytest.raises(
+        ValueError,
+        match="symbols do not match request",
+    ):
+        parse_option_tickers_payload(
+            {
+                "success": True,
+                "result": [btc],
+            },
+            expected_symbols=(
+                str(btc["symbol"]),
+                "C-ETH-2450-040926",
+            ),
+        )

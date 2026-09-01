@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from enum import StrEnum
 
+from nautilus_delta_options.delta.models import DeltaOptionTicker
 from nautilus_delta_options.delta.snapshot import DeltaOptionMarketRecord
 from nautilus_delta_options.payoff.fees import (
     OptionFeeSchedule,
@@ -41,6 +42,8 @@ class PaperPosition:
     target_spot: Decimal = Decimal("0")
     planned_loss: Decimal = Decimal("0")
     planned_reward: Decimal = Decimal("0")
+    taker_fee: Decimal = Decimal("0.0001")
+    premium_cap_rate: Decimal = Decimal("0.035")
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,6 +259,8 @@ class PaperLedger:
             target_spot=target_spot,
             planned_loss=payoff.planned_loss,
             planned_reward=payoff.planned_reward,
+            taker_fee=record.product.taker_fee,
+            premium_cap_rate=record.product.premium_cap_rate,
         )
 
         self._cash -= entry_debit
@@ -290,6 +295,40 @@ class PaperLedger:
 
         return None
 
+    def process_exit_ticker(
+        self,
+        trade_id: int,
+        ticker: DeltaOptionTicker,
+    ) -> PaperClosedTrade | None:
+        position = self._require_position(trade_id)
+        event_ns = self._validate_exit_ticker(
+            position,
+            ticker,
+        )
+
+        if ticker.best_bid is None:
+            return None
+
+        if ticker.best_bid <= position.stop_price:
+            return self._close_long_with_ticker(
+                position,
+                ticker,
+                reason=ExitReason.STOP,
+                event_ns=event_ns,
+                fee_schedule=self._position_fee_schedule(position),
+            )
+
+        if ticker.best_bid >= position.target_price:
+            return self._close_long_with_ticker(
+                position,
+                ticker,
+                reason=ExitReason.TARGET,
+                event_ns=event_ns,
+                fee_schedule=self._position_fee_schedule(position),
+            )
+
+        return None
+
     def close_long(
         self,
         trade_id: int,
@@ -304,14 +343,41 @@ class PaperLedger:
         if record.quote is None:
             raise ValueError("Exit record has no executable quote")
 
-        ticker = record.ticker
+        event_ns = self._validate_exit_ticker(
+            position,
+            record.ticker,
+        )
 
+        if record.quote.ts_event != event_ns:
+            raise ValueError(
+                "Exit quote timestamp does not match ticker timestamp"
+            )
+
+        return self._close_long_with_ticker(
+            position,
+            record.ticker,
+            reason=reason,
+            event_ns=event_ns,
+            fee_schedule=self._fee_schedule(record),
+        )
+
+    def _close_long_with_ticker(
+        self,
+        position: PaperPosition,
+        ticker: DeltaOptionTicker,
+        *,
+        reason: ExitReason,
+        event_ns: int,
+        fee_schedule: OptionFeeSchedule,
+    ) -> PaperClosedTrade:
         if ticker.best_bid is None or ticker.bid_size is None:
             raise ValueError("Ticker is missing executable bid data")
+        if ticker.best_bid <= 0:
+            raise ValueError("Ticker best bid must be positive")
+        if ticker.bid_size <= 0:
+            raise ValueError("Ticker bid size must be positive")
         if ticker.bid_size < position.contracts:
             raise ValueError("Position exceeds available bid depth")
-        if record.quote.ts_event < position.opened_ns:
-            raise ValueError("Exit quote predates the position")
 
         if reason == ExitReason.STOP and ticker.best_bid > position.stop_price:
             raise ValueError("STOP reason used before stop was reached")
@@ -323,13 +389,17 @@ class PaperLedger:
             option_price=ticker.best_bid,
             contracts=position.contracts,
             contract_value=position.contract_value,
-            schedule=self._fee_schedule(record),
+            schedule=fee_schedule,
         )
 
         underlying_quantity = position.contracts * position.contract_value
-        gross_pnl = (ticker.best_bid - position.entry_price) * underlying_quantity
+        gross_pnl = (
+            ticker.best_bid - position.entry_price
+        ) * underlying_quantity
         net_pnl = gross_pnl - position.entry_fee - fee.total_fee
-        exit_proceeds = (ticker.best_bid * underlying_quantity) - fee.total_fee
+        exit_proceeds = (
+            ticker.best_bid * underlying_quantity
+        ) - fee.total_fee
 
         closed_trade = PaperClosedTrade(
             position=position,
@@ -339,14 +409,63 @@ class PaperLedger:
             gross_pnl=gross_pnl,
             net_pnl=net_pnl,
             reason=reason,
-            closed_ns=record.quote.ts_event,
+            closed_ns=event_ns,
         )
 
         self._cash += exit_proceeds
-        del self._positions[trade_id]
+        del self._positions[position.trade_id]
         self._closed_trades.append(closed_trade)
 
         return closed_trade
+
+    def _validate_exit_ticker(
+        self,
+        position: PaperPosition,
+        ticker: DeltaOptionTicker,
+    ) -> int:
+        checks = (
+            (
+                ticker.product_id == position.product_id,
+                "product_id mismatch",
+            ),
+            (
+                ticker.symbol == position.symbol,
+                "symbol mismatch",
+            ),
+            (
+                ticker.underlying == position.underlying,
+                "underlying mismatch",
+            ),
+            (
+                ticker.contract_type == position.contract_type,
+                "contract_type mismatch",
+            ),
+            (
+                ticker.contract_value == position.contract_value,
+                "contract_value mismatch",
+            ),
+        )
+
+        for matches, message in checks:
+            if not matches:
+                raise ValueError(
+                    f"Exit ticker does not match position: {message}"
+                )
+
+        if ticker.trading_status != "operational":
+            raise ValueError("Exit ticker is not operational")
+
+        if ticker.exchange_timestamp <= 0:
+            raise ValueError(
+                "Exit ticker timestamp must be positive"
+            )
+
+        event_ns = ticker.exchange_timestamp * 1_000
+
+        if event_ns < position.opened_ns:
+            raise ValueError("Exit ticker predates the position")
+
+        return event_ns
 
     def _require_position(self, trade_id: int) -> PaperPosition:
         position = self._positions.get(trade_id)
@@ -361,5 +480,15 @@ class PaperLedger:
         return OptionFeeSchedule(
             notional_rate=record.product.taker_fee,
             premium_cap_rate=record.product.premium_cap_rate,
+            gst_rate=self._gst_rate,
+        )
+
+    def _position_fee_schedule(
+        self,
+        position: PaperPosition,
+    ) -> OptionFeeSchedule:
+        return OptionFeeSchedule(
+            notional_rate=position.taker_fee,
+            premium_cap_rate=position.premium_cap_rate,
             gst_rate=self._gst_rate,
         )

@@ -3,6 +3,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Self
 
+from nautilus_delta_options.delta.models import DeltaOptionTicker
 from nautilus_delta_options.delta.snapshot import (
     DeltaOptionMarketRecord,
 )
@@ -141,6 +142,21 @@ class PaperLedgerSession:
         closed_trade = self._ledger.process_exit(
             trade_id,
             record,
+        )
+
+        if closed_trade is not None:
+            self._store.save(self._ledger)
+
+        return closed_trade
+
+    def process_exit_ticker(
+        self,
+        trade_id: int,
+        ticker: DeltaOptionTicker,
+    ) -> PaperClosedTrade | None:
+        closed_trade = self._ledger.process_exit_ticker(
+            trade_id,
+            ticker,
         )
 
         if closed_trade is not None:

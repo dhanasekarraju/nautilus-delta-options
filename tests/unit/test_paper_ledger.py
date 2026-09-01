@@ -171,6 +171,8 @@ def test_opens_approved_long_at_ask() -> None:
     assert position.entry_price == Decimal("1000")
     assert position.entry_premium == Decimal("10.000")
     assert position.entry_fee == Decimal("0.094400000")
+    assert position.taker_fee == Decimal("0.0001")
+    assert position.premium_cap_rate == Decimal("0.035")
     assert position.planned_reward_risk > Decimal("1.52")
     assert ledger.cash == Decimal("89.905600000")
     assert len(ledger.open_positions) == 1
@@ -332,6 +334,8 @@ def test_persistent_session_saves_entry_automatically(
 
     assert restored is not None
     assert restored.open_positions == (position,)
+    assert restored.open_positions[0].taker_fee == Decimal("0.0001")
+    assert restored.open_positions[0].premium_cap_rate == Decimal("0.035")
     assert restored.cash == Decimal("89.905600000")
     assert restored.next_trade_id == 2
 
@@ -1082,3 +1086,196 @@ def test_observer_enabled_mode_opens_once_per_signal(
 
     assert restored is not None
     assert restored.open_positions == session.ledger.open_positions
+
+
+def test_ticker_only_target_matches_full_record_exit() -> None:
+    record_ledger = _ledger()
+    ticker_ledger = _ledger()
+
+    record_position = record_ledger.open_long(
+        _record(),
+        contracts=Decimal("10"),
+        stop_exit_bid=Decimal("900"),
+        target_exit_bid=Decimal("1200"),
+        stop_spot=Decimal("79500"),
+        target_spot=Decimal("81000"),
+    )
+    ticker_position = ticker_ledger.open_long(
+        _record(),
+        contracts=Decimal("10"),
+        stop_exit_bid=Decimal("900"),
+        target_exit_bid=Decimal("1200"),
+        stop_spot=Decimal("79500"),
+        target_spot=Decimal("81000"),
+    )
+
+    exit_record = _record(
+        bid="1200",
+        ask="1210",
+        spot="81000",
+        timestamp_us=TIMESTAMP_US + 1,
+    )
+
+    record_closed = record_ledger.process_exit(
+        record_position.trade_id,
+        exit_record,
+    )
+    ticker_closed = ticker_ledger.process_exit_ticker(
+        ticker_position.trade_id,
+        exit_record.ticker,
+    )
+
+    assert ticker_closed == record_closed
+    assert ticker_ledger.cash == record_ledger.cash
+    assert ticker_ledger.realized_pnl == record_ledger.realized_pnl
+
+
+def test_ticker_only_stop_uses_current_executable_bid() -> None:
+    ledger = _ledger()
+    position = ledger.open_long(
+        _record(),
+        contracts=Decimal("10"),
+        stop_exit_bid=Decimal("900"),
+        target_exit_bid=Decimal("1200"),
+        stop_spot=Decimal("79500"),
+        target_spot=Decimal("81000"),
+    )
+
+    closed = ledger.process_exit_ticker(
+        position.trade_id,
+        _ticker(
+            bid="880",
+            ask="890",
+            spot="79000",
+            timestamp_us=TIMESTAMP_US + 1,
+        ),
+    )
+
+    assert closed is not None
+    assert closed.reason == ExitReason.STOP
+    assert closed.exit_price == Decimal("880")
+    assert ledger.open_positions == ()
+
+
+def test_ticker_only_exit_rejects_stale_ticker() -> None:
+    ledger = _ledger()
+    position = ledger.open_long(
+        _record(),
+        contracts=Decimal("10"),
+        stop_exit_bid=Decimal("900"),
+        target_exit_bid=Decimal("1200"),
+        stop_spot=Decimal("79500"),
+        target_spot=Decimal("81000"),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="predates the position",
+    ):
+        ledger.process_exit_ticker(
+            position.trade_id,
+            _ticker(
+                bid="880",
+                ask="890",
+                timestamp_us=TIMESTAMP_US - 1,
+            ),
+        )
+
+
+def test_ticker_only_exit_rejects_mismatched_product() -> None:
+    ledger = _ledger()
+    position = ledger.open_long(
+        _record(),
+        contracts=Decimal("10"),
+        stop_exit_bid=Decimal("900"),
+        target_exit_bid=Decimal("1200"),
+        stop_spot=Decimal("79500"),
+        target_spot=Decimal("81000"),
+    )
+
+    mismatched = replace(
+        _ticker(
+            bid="880",
+            ask="890",
+            timestamp_us=TIMESTAMP_US + 1,
+        ),
+        product_id=999,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="product_id mismatch",
+    ):
+        ledger.process_exit_ticker(
+            position.trade_id,
+            mismatched,
+        )
+
+
+def test_ticker_only_exit_rejects_insufficient_bid_depth() -> None:
+    ledger = _ledger()
+    position = ledger.open_long(
+        _record(),
+        contracts=Decimal("10"),
+        stop_exit_bid=Decimal("900"),
+        target_exit_bid=Decimal("1200"),
+        stop_spot=Decimal("79500"),
+        target_spot=Decimal("81000"),
+    )
+
+    shallow = replace(
+        _ticker(
+            bid="880",
+            ask="890",
+            timestamp_us=TIMESTAMP_US + 1,
+        ),
+        bid_size=Decimal("5"),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="available bid depth",
+    ):
+        ledger.process_exit_ticker(
+            position.trade_id,
+            shallow,
+        )
+
+
+def test_persistent_session_saves_ticker_exit_automatically(
+    tmp_path: Path,
+) -> None:
+    store = SQLitePaperLedgerStore(tmp_path / "paper.sqlite")
+    session = PaperLedgerSession.load_or_create(
+        store,
+        initial_cash=Decimal("100"),
+        minimum_reward_risk=Decimal("1.5"),
+        max_positions=3,
+    )
+
+    position = session.open_long(
+        _record(),
+        contracts=Decimal("10"),
+        stop_exit_bid=Decimal("900"),
+        target_exit_bid=Decimal("1200"),
+        stop_spot=Decimal("79500"),
+        target_spot=Decimal("81000"),
+    )
+
+    closed = session.process_exit_ticker(
+        position.trade_id,
+        _ticker(
+            bid="880",
+            ask="890",
+            spot="79000",
+            timestamp_us=TIMESTAMP_US + 1,
+        ),
+    )
+
+    restored = store.load()
+
+    assert closed is not None
+    assert closed.reason == ExitReason.STOP
+    assert restored is not None
+    assert restored.open_positions == ()
+    assert restored.closed_trades == (closed,)

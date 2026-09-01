@@ -1,7 +1,7 @@
 import json
 import urllib.parse
 import urllib.request
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal, cast
 
@@ -63,6 +63,55 @@ class DeltaPublicClient:
             underlying=underlying,
         )
         return parse_option_products_payload(payload, underlying=underlying)
+
+    def fetch_option_tickers(
+        self,
+        symbols: Sequence[str],
+    ) -> tuple[DeltaOptionTicker, ...]:
+        if not symbols:
+            raise ValueError("At least one option symbol is required")
+        if len(symbols) > 10:
+            raise ValueError("At most 10 option symbols may be requested")
+
+        normalized_symbols: list[str] = []
+
+        for symbol in symbols:
+            if not isinstance(symbol, str) or not symbol.strip():
+                raise ValueError("Option symbols must be non-empty strings")
+
+            normalized = symbol.strip()
+            if "," in normalized:
+                raise ValueError("Option symbols must not contain commas")
+
+            normalized_symbols.append(normalized)
+
+        if len(normalized_symbols) != len(set(normalized_symbols)):
+            raise ValueError("Option symbols must be unique")
+
+        encoded_symbols = urllib.parse.quote(
+            ",".join(normalized_symbols),
+            safe=",",
+        )
+        url = f"{self._base_url}/v2/tickers/{encoded_symbols}"
+
+        request = urllib.request.Request(
+            url,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "nautilus-delta-options/0.1",
+            },
+        )
+
+        with urllib.request.urlopen(
+            request,
+            timeout=self._timeout_seconds,
+        ) as response:
+            payload = cast(object, json.load(response))
+
+        return parse_option_tickers_payload(
+            payload,
+            expected_symbols=normalized_symbols,
+        )
 
     def _fetch_options_payload(
         self,
@@ -162,6 +211,76 @@ def parse_option_products_payload(
         underlying=underlying,
         products=tuple(products),
         rejected_records=tuple(rejected_records),
+    )
+
+
+def parse_option_tickers_payload(
+    payload: object,
+    *,
+    expected_symbols: Sequence[str],
+) -> tuple[DeltaOptionTicker, ...]:
+    if not expected_symbols:
+        raise ValueError("At least one expected symbol is required")
+
+    if not isinstance(payload, Mapping):
+        raise ValueError("Delta response must be an object")
+
+    response = cast(Mapping[str, object], payload)
+
+    if response.get("success") is not True:
+        raise ValueError("Delta response indicated failure")
+
+    raw_result = response.get("result")
+
+    if isinstance(raw_result, Mapping):
+        raw_records: list[object] = [raw_result]
+    elif isinstance(raw_result, list):
+        raw_records = cast(list[object], raw_result)
+    else:
+        raise ValueError(
+            "Delta ticker response result must be an object or list"
+        )
+
+    tickers: list[DeltaOptionTicker] = []
+
+    for index, raw_record in enumerate(raw_records):
+        if not isinstance(raw_record, Mapping):
+            raise ValueError(
+                f"ticker record {index}: must be an object"
+            )
+
+        tickers.append(
+            DeltaOptionTicker.from_api(
+                cast(Mapping[str, object], raw_record),
+            ),
+        )
+
+    tickers_by_symbol = {
+        ticker.symbol: ticker
+        for ticker in tickers
+    }
+
+    if len(tickers_by_symbol) != len(tickers):
+        raise ValueError(
+            "Delta ticker response contains duplicate symbols"
+        )
+
+    expected = tuple(expected_symbols)
+    expected_set = set(expected)
+    actual_set = set(tickers_by_symbol)
+
+    if actual_set != expected_set:
+        missing = sorted(expected_set - actual_set)
+        unexpected = sorted(actual_set - expected_set)
+
+        raise ValueError(
+            "Delta ticker response symbols do not match request: "
+            f"missing={missing}, unexpected={unexpected}"
+        )
+
+    return tuple(
+        tickers_by_symbol[symbol]
+        for symbol in expected
     )
 
 
