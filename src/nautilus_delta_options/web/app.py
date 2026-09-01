@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
@@ -13,6 +14,9 @@ from fastapi.responses import HTMLResponse
 
 from nautilus_delta_options.delta.public_client import (
     DeltaPublicClient,
+)
+from nautilus_delta_options.paper.fast_exit import (
+    run_fast_exit_cycle,
 )
 from nautilus_delta_options.paper.ledger import PaperLedger
 from nautilus_delta_options.paper.observer import (
@@ -30,6 +34,7 @@ from nautilus_delta_options.signals.v31 import (
 )
 
 _DASHBOARD_PATH = Path(__file__).with_name("dashboard.html")
+_LOGGER = logging.getLogger(__name__)
 
 
 class DashboardState:
@@ -46,6 +51,7 @@ def create_app(
     *,
     database: Path | None = None,
     interval_seconds: int | None = None,
+    exit_interval_seconds: int | None = None,
     entries_enabled: bool | None = None,
 ) -> FastAPI:
     resolved_database = database or Path(
@@ -58,6 +64,20 @@ def create_app(
         "OBSERVER_INTERVAL_SECONDS",
         60,
     )
+    resolved_exit_interval = (
+        exit_interval_seconds
+        if exit_interval_seconds is not None
+        else _integer_env(
+            "POSITION_EXIT_INTERVAL_SECONDS",
+            5,
+        )
+    )
+
+    if resolved_exit_interval <= 0:
+        raise ValueError(
+            "POSITION_EXIT_INTERVAL_SECONDS must be positive"
+        )
+
     resolved_entries_enabled = (
         entries_enabled
         if entries_enabled is not None
@@ -79,9 +99,10 @@ def create_app(
             3,
         ),
     )
+    delta_client = DeltaPublicClient()
     signal_client = BinanceFuturesPublicClient()
     observer = PaperDryRunObserver(
-        client=DeltaPublicClient(),
+        client=delta_client,
         session=session,
         signal_client=signal_client,
         entries_enabled=resolved_entries_enabled,
@@ -98,13 +119,27 @@ def create_app(
                 interval_seconds=resolved_interval,
             )
         )
+        fast_exit_task = asyncio.create_task(
+            _poll_fast_exits(
+                client=delta_client,
+                session=session,
+                interval_seconds=resolved_exit_interval,
+            )
+        )
+        tasks = (
+            polling_task,
+            fast_exit_task,
+        )
 
         try:
             yield
         finally:
-            polling_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await polling_task
+            for task in tasks:
+                task.cancel()
+
+            for task in tasks:
+                with suppress(asyncio.CancelledError):
+                    await task
 
     application = FastAPI(
         title="Nautilus Delta Options",
@@ -149,6 +184,7 @@ def create_app(
                 "unknown",
             ),
             "entries_enabled": observer.entries_enabled,
+            "position_exit_interval_seconds": resolved_exit_interval,
         }
 
     return application
@@ -177,6 +213,47 @@ async def _poll_dashboard(
                 "updated_at": datetime.now(UTC).isoformat(),
                 "message": str(error),
             }
+
+        await asyncio.sleep(interval_seconds)
+
+
+async def _poll_fast_exits(
+    *,
+    client: DeltaPublicClient,
+    session: PaperLedgerSession,
+    interval_seconds: int,
+) -> None:
+    while True:
+        try:
+            cycle = await asyncio.to_thread(
+                run_fast_exit_cycle,
+                client=client,
+                session=session,
+            )
+
+            for trade in cycle.closed_trades:
+                _LOGGER.info(
+                    "FAST_EXIT trade_id=%s symbol=%s "
+                    "reason=%s exit_price=%s net_pnl=%s",
+                    trade.position.trade_id,
+                    trade.position.symbol,
+                    trade.reason.value,
+                    trade.exit_price,
+                    trade.net_pnl,
+                )
+
+            for warning in cycle.warnings:
+                _LOGGER.warning(
+                    "FAST_EXIT_WARNING %s",
+                    warning,
+                )
+
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _LOGGER.exception(
+                "FAST_EXIT_CYCLE_FAILED"
+            )
 
         await asyncio.sleep(interval_seconds)
 
