@@ -135,7 +135,9 @@ class PaperDryRunObserver:
 
         closed_trades: list[PaperClosedTrade] = []
 
-        for position in tuple(self._session.ledger.open_positions):
+        ledger_snapshot = self._session.snapshot()
+
+        for position in ledger_snapshot.open_positions:
             record = records_by_product.get(position.product_id)
 
             if record is None:
@@ -251,7 +253,11 @@ def _rank_global_proposals(
     config: PaperProposalConfig,
     excluded_product_ids: frozenset[int],
 ) -> tuple[PaperEntryProposal, ...]:
-    available_slots = session.ledger.max_positions - len(session.ledger.open_positions)
+    ledger_snapshot = session.snapshot()
+    available_slots = (
+        ledger_snapshot.max_positions
+        - len(ledger_snapshot.open_positions)
+    )
 
     if available_slots <= 0:
         return ()
@@ -261,7 +267,7 @@ def _rank_global_proposals(
         for snapshot in snapshots
         for proposal in build_ranked_paper_entry_proposals(
             snapshot,
-            ledger=session.ledger,
+            ledger=ledger_snapshot,
             config=config,
         )
     ]

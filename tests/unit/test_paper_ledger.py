@@ -1279,3 +1279,37 @@ def test_persistent_session_saves_ticker_exit_automatically(
     assert restored is not None
     assert restored.open_positions == ()
     assert restored.closed_trades == (closed,)
+
+
+def test_session_ledger_returns_detached_snapshot(
+    tmp_path: Path,
+) -> None:
+    store = SQLitePaperLedgerStore(tmp_path / "paper.sqlite")
+    session = PaperLedgerSession.load_or_create(
+        store,
+        initial_cash=Decimal("100"),
+        minimum_reward_risk=Decimal("1.5"),
+        max_positions=3,
+    )
+
+    before_entry = session.ledger
+
+    position = session.open_long(
+        _record(),
+        contracts=Decimal("10"),
+        stop_exit_bid=Decimal("900"),
+        target_exit_bid=Decimal("1200"),
+        stop_spot=Decimal("79500"),
+        target_spot=Decimal("81000"),
+    )
+
+    after_entry = session.snapshot()
+
+    assert before_entry.open_positions == ()
+    assert before_entry.cash == Decimal("100")
+
+    assert after_entry.open_positions == (position,)
+    assert after_entry.cash == session.ledger.cash
+
+    assert before_entry is not after_entry
+    assert after_entry is not session.ledger

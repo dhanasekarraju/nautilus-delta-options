@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from threading import RLock
 from typing import Self
 
 from nautilus_delta_options.delta.models import DeltaOptionTicker
@@ -36,6 +37,7 @@ class PaperLedgerSession:
     ) -> None:
         self._ledger = ledger
         self._store = store
+        self._lock = RLock()
 
     @classmethod
     def load_or_create(
@@ -67,7 +69,11 @@ class PaperLedgerSession:
 
     @property
     def ledger(self) -> PaperLedger:
-        return self._ledger
+        return self.snapshot()
+
+    def snapshot(self) -> PaperLedger:
+        with self._lock:
+            return _clone_ledger(self._ledger)
 
     def open_long(
         self,
@@ -79,19 +85,21 @@ class PaperLedgerSession:
         stop_spot: Decimal,
         target_spot: Decimal,
     ) -> PaperPosition:
-        position = self._ledger.open_long(
-            record,
-            contracts=contracts,
-            stop_exit_bid=stop_exit_bid,
-            target_exit_bid=target_exit_bid,
-            stop_spot=stop_spot,
-            target_spot=target_spot,
-        )
-        self._store.save(self._ledger)
-        return position
+        with self._lock:
+            position = self._ledger.open_long(
+                record,
+                contracts=contracts,
+                stop_exit_bid=stop_exit_bid,
+                target_exit_bid=target_exit_bid,
+                stop_spot=stop_spot,
+                target_spot=target_spot,
+            )
+            self._store.save(self._ledger)
+            return position
 
     def has_consumed_signal(self, signal_key: str) -> bool:
-        return self._store.has_consumed_signal(signal_key)
+        with self._lock:
+            return self._store.has_consumed_signal(signal_key)
 
     def open_long_for_signal(
         self,
@@ -106,63 +114,66 @@ class PaperLedgerSession:
         stop_spot: Decimal,
         target_spot: Decimal,
     ) -> PaperPosition:
-        if record.ticker.underlying != signal_underlying:
-            raise ValueError("Signal underlying does not match the market record")
-        if self._store.has_consumed_signal(signal_key):
-            raise PaperSignalAlreadyConsumedError(f"Signal already consumed: {signal_key}")
+        with self._lock:
+            if record.ticker.underlying != signal_underlying:
+                raise ValueError("Signal underlying does not match the market record")
+            if self._store.has_consumed_signal(signal_key):
+                raise PaperSignalAlreadyConsumedError(f"Signal already consumed: {signal_key}")
 
-        candidate = _clone_ledger(self._ledger)
-        position = candidate.open_long(
-            record,
-            contracts=contracts,
-            stop_exit_bid=stop_exit_bid,
-            target_exit_bid=target_exit_bid,
-            stop_spot=stop_spot,
-            target_spot=target_spot,
-        )
-        receipt = self._store.save_with_signal(
-            candidate,
-            signal_key=signal_key,
-            underlying=signal_underlying,
-            candle_closed_ns=candle_closed_ns,
-            trade_id=position.trade_id,
-        )
+            candidate = _clone_ledger(self._ledger)
+            position = candidate.open_long(
+                record,
+                contracts=contracts,
+                stop_exit_bid=stop_exit_bid,
+                target_exit_bid=target_exit_bid,
+                stop_spot=stop_spot,
+                target_spot=target_spot,
+            )
+            receipt = self._store.save_with_signal(
+                candidate,
+                signal_key=signal_key,
+                underlying=signal_underlying,
+                candle_closed_ns=candle_closed_ns,
+                trade_id=position.trade_id,
+            )
 
-        if receipt is None:
-            raise PaperSignalAlreadyConsumedError(f"Signal already consumed: {signal_key}")
+            if receipt is None:
+                raise PaperSignalAlreadyConsumedError(f"Signal already consumed: {signal_key}")
 
-        self._ledger = candidate
-        return position
+            self._ledger = candidate
+            return position
 
     def process_exit(
         self,
         trade_id: int,
         record: DeltaOptionMarketRecord,
     ) -> PaperClosedTrade | None:
-        closed_trade = self._ledger.process_exit(
-            trade_id,
-            record,
-        )
+        with self._lock:
+            closed_trade = self._ledger.process_exit(
+                trade_id,
+                record,
+            )
 
-        if closed_trade is not None:
-            self._store.save(self._ledger)
+            if closed_trade is not None:
+                self._store.save(self._ledger)
 
-        return closed_trade
+            return closed_trade
 
     def process_exit_ticker(
         self,
         trade_id: int,
         ticker: DeltaOptionTicker,
     ) -> PaperClosedTrade | None:
-        closed_trade = self._ledger.process_exit_ticker(
-            trade_id,
-            ticker,
-        )
+        with self._lock:
+            closed_trade = self._ledger.process_exit_ticker(
+                trade_id,
+                ticker,
+            )
 
-        if closed_trade is not None:
-            self._store.save(self._ledger)
+            if closed_trade is not None:
+                self._store.save(self._ledger)
 
-        return closed_trade
+            return closed_trade
 
     def close_long(
         self,
@@ -171,13 +182,14 @@ class PaperLedgerSession:
         *,
         reason: ExitReason = ExitReason.MANUAL,
     ) -> PaperClosedTrade:
-        closed_trade = self._ledger.close_long(
-            trade_id,
-            record,
-            reason=reason,
-        )
-        self._store.save(self._ledger)
-        return closed_trade
+        with self._lock:
+            closed_trade = self._ledger.close_long(
+                trade_id,
+                record,
+                reason=reason,
+            )
+            self._store.save(self._ledger)
+            return closed_trade
 
 
 def _clone_ledger(ledger: PaperLedger) -> PaperLedger:

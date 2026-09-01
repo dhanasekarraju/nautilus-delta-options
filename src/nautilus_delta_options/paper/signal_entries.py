@@ -119,9 +119,11 @@ def process_v31_call_signal(
             risk_decisions=(),
         )
 
+    ledger_snapshot = session.snapshot()
+
     proposals = build_ranked_paper_entry_proposals(
         snapshot,
-        ledger=session.ledger,
+        ledger=ledger_snapshot,
         config=resolved_proposal_config,
         contract_type="call_options",
     )
@@ -139,7 +141,7 @@ def process_v31_call_signal(
 
     for proposal in proposals:
         risk = evaluate_portfolio_entry(
-            session.ledger,
+            ledger_snapshot,
             proposal,
             config=portfolio_config,
         )
