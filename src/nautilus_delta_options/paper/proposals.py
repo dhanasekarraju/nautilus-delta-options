@@ -215,6 +215,12 @@ def build_ranked_paper_entry_proposals(
     return tuple(approved)
 
 
+def paper_proposal_quality_key(
+    proposal: PaperEntryProposal,
+) -> tuple[Decimal, Decimal, Decimal, str]:
+    return _execution_quality_key(proposal.record)
+
+
 def _execution_quality_key(
     record: DeltaOptionMarketRecord,
 ) -> tuple[Decimal, Decimal, Decimal, str]:

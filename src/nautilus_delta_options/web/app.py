@@ -28,9 +28,9 @@ from nautilus_delta_options.paper.persistence import (
 )
 from nautilus_delta_options.paper.session import PaperLedgerSession
 from nautilus_delta_options.signals.binance import BinanceFuturesPublicClient
-from nautilus_delta_options.signals.v31 import (
-    V31CallSignal,
-    evaluate_v31_call_signal,
+from nautilus_delta_options.signals.v32 import (
+    V32Signal,
+    evaluate_v32_signal,
 )
 
 _DASHBOARD_PATH = Path(__file__).with_name("dashboard.html")
@@ -74,9 +74,7 @@ def create_app(
     )
 
     if resolved_exit_interval <= 0:
-        raise ValueError(
-            "POSITION_EXIT_INTERVAL_SECONDS must be positive"
-        )
+        raise ValueError("POSITION_EXIT_INTERVAL_SECONDS must be positive")
 
     resolved_entries_enabled = (
         entries_enabled
@@ -233,8 +231,7 @@ async def _poll_fast_exits(
 
             for trade in cycle.closed_trades:
                 _LOGGER.info(
-                    "FAST_EXIT trade_id=%s symbol=%s "
-                    "reason=%s exit_price=%s net_pnl=%s",
+                    "FAST_EXIT trade_id=%s symbol=%s reason=%s exit_price=%s net_pnl=%s",
                     trade.position.trade_id,
                     trade.position.symbol,
                     trade.reason.value,
@@ -251,9 +248,7 @@ async def _poll_fast_exits(
         except asyncio.CancelledError:
             raise
         except Exception:
-            _LOGGER.exception(
-                "FAST_EXIT_CYCLE_FAILED"
-            )
+            _LOGGER.exception("FAST_EXIT_CYCLE_FAILED")
 
         await asyncio.sleep(interval_seconds)
 
@@ -352,19 +347,19 @@ def _proposal_payload(
 
 def _fetch_v31_signals(
     client: BinanceFuturesPublicClient,
-) -> tuple[V31CallSignal, ...]:
+) -> tuple[V32Signal, ...]:
     return (
-        evaluate_v31_call_signal(client.fetch_v31_candles("BTC")),
-        evaluate_v31_call_signal(client.fetch_v31_candles("ETH")),
+        evaluate_v32_signal(client.fetch_v31_candles("BTC")),
+        evaluate_v32_signal(client.fetch_v31_candles("ETH")),
     )
 
 
 def _signal_payload(
-    signal: V31CallSignal,
+    signal: V32Signal,
 ) -> dict[str, object]:
     return {
         "underlying": signal.underlying,
-        "decision": "CALL" if signal.active else "WAIT",
+        "decision": (signal.decision.value.upper() if signal.active else "WAIT"),
         "active": signal.active,
         "candle_closed_at": datetime.fromtimestamp(
             signal.candle_close_ms / 1_000,
@@ -377,12 +372,15 @@ def _signal_payload(
         "atr_percent": signal.atr_pct * 100,
         "volume": signal.volume,
         "conditions": {
-            "RSI < 35": signal.rsi_below_35,
-            "EMA20 > EMA50": signal.ema20_above_ema50,
+            "CALL: RSI < 35": signal.rsi_below_35,
+            "CALL: EMA20 > EMA50": (signal.ema20_above_ema50),
+            "PUT: RSI > 65": signal.rsi_above_65,
+            "PUT: EMA20 < EMA50": (signal.ema20_below_ema50),
             "ATR < 3.5%": signal.atr_pct_below_035,
             "Volume > 0": signal.positive_volume,
         },
         "signal_key": signal.signal_key,
+        "episode_key": signal.episode_key,
     }
 
 

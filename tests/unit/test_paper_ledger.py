@@ -37,6 +37,9 @@ from nautilus_delta_options.paper.signal_entries import (
     PaperSignalEntryStatus,
     process_v31_call_signal,
 )
+from nautilus_delta_options.paper.signal_entries_v32 import (
+    PaperSignalEntryStatus as V32PaperSignalEntryStatus,
+)
 from nautilus_delta_options.selection.eligibility import EligibilityConfig
 from nautilus_delta_options.selection.entry_safety import (
     EntrySafetyReason,
@@ -45,6 +48,10 @@ from nautilus_delta_options.selection.entry_safety import (
 from nautilus_delta_options.signals.v31 import (
     V31CallSignal,
     V31SignalDecision,
+)
+from nautilus_delta_options.signals.v32 import (
+    V32Signal,
+    V32SignalDecision,
 )
 
 AS_OF = date(2026, 8, 28)
@@ -808,6 +815,47 @@ def _v31_signal(
     )
 
 
+def _v32_signal(
+    *,
+    underlying: str = "BTC",
+    decision: V32SignalDecision = V32SignalDecision.CALL,
+    candle_close_ms: int = 1_787_887_499_999,
+) -> V32Signal:
+    if decision is V32SignalDecision.CALL:
+        rsi = 30.0
+        ema20 = 80100.0
+        ema50 = 80000.0
+    elif decision is V32SignalDecision.PUT:
+        rsi = 70.0
+        ema20 = 79900.0
+        ema50 = 80000.0
+    else:
+        rsi = 50.0
+        ema20 = 80000.0
+        ema50 = 80000.0
+
+    return V32Signal(
+        underlying=underlying,
+        symbol=f"{underlying}USDT",
+        candle_open_ms=candle_close_ms - 299_999,
+        candle_close_ms=candle_close_ms,
+        close_price=80000.0,
+        rsi=rsi,
+        ema20=ema20,
+        ema50=ema50,
+        atr=200.0,
+        atr_pct=0.0025,
+        volume=100.0,
+        rsi_below_35=rsi < 35,
+        rsi_above_65=rsi > 65,
+        ema20_above_ema50=ema20 > ema50,
+        ema20_below_ema50=ema20 < ema50,
+        atr_pct_below_035=True,
+        positive_volume=True,
+        decision=decision,
+    )
+
+
 def _signal_snapshot(
     record: DeltaOptionMarketRecord | None = None,
 ) -> DeltaMarketSnapshot:
@@ -1019,15 +1067,15 @@ class _StaticSignalClient:
         return object()
 
 
-def _install_static_call_signal(
+def _install_static_v32_signal(
     monkeypatch: pytest.MonkeyPatch,
-    signal: V31CallSignal,
+    signal: V32Signal,
 ) -> None:
-    def fake_evaluate(_: object) -> V31CallSignal:
+    def fake_evaluate(_: object) -> V32Signal:
         return signal
 
     monkeypatch.setattr(
-        "nautilus_delta_options.paper.observer.evaluate_v31_call_signal",
+        "nautilus_delta_options.paper.observer.evaluate_v32_signal",
         fake_evaluate,
     )
 
@@ -1037,8 +1085,8 @@ def test_observer_entry_mode_defaults_to_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session, store = _paper_signal_session(tmp_path)
-    signal = _v31_signal()
-    _install_static_call_signal(monkeypatch, signal)
+    signal = _v32_signal()
+    _install_static_v32_signal(monkeypatch, signal)
     observer = PaperDryRunObserver(
         client=_StaticMarketClient(_ticker(timestamp_us=signal.candle_close_ms * 1_000)),
         session=session,
@@ -1053,9 +1101,9 @@ def test_observer_entry_mode_defaults_to_disabled(
     assert not cycle.entries_enabled
     assert cycle.signals == (signal,)
     assert len(cycle.entry_results) == 1
-    assert cycle.entry_results[0].status is PaperSignalEntryStatus.DISABLED
+    assert cycle.entry_results[0].status is V32PaperSignalEntryStatus.DISABLED
     assert session.ledger.open_positions == ()
-    assert not store.has_consumed_signal(signal.signal_key)
+    assert not store.has_consumed_signal(signal.episode_key)
 
 
 def test_observer_enabled_mode_opens_once_per_signal(
@@ -1063,8 +1111,8 @@ def test_observer_enabled_mode_opens_once_per_signal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session, store = _paper_signal_session(tmp_path)
-    signal = _v31_signal()
-    _install_static_call_signal(monkeypatch, signal)
+    signal = _v32_signal()
+    _install_static_v32_signal(monkeypatch, signal)
     observer = PaperDryRunObserver(
         client=_StaticMarketClient(_ticker(timestamp_us=signal.candle_close_ms * 1_000)),
         session=session,
@@ -1079,10 +1127,10 @@ def test_observer_enabled_mode_opens_once_per_signal(
 
     assert observer.entries_enabled
     assert first_cycle.entries_enabled
-    assert first_cycle.entry_results[0].status is PaperSignalEntryStatus.OPENED
-    assert second_cycle.entry_results[0].status is PaperSignalEntryStatus.ALREADY_CONSUMED
+    assert first_cycle.entry_results[0].status is V32PaperSignalEntryStatus.OPENED
+    assert second_cycle.entry_results[0].status is V32PaperSignalEntryStatus.ALREADY_CONSUMED
     assert len(session.ledger.open_positions) == 1
-    assert store.has_consumed_signal(signal.signal_key)
+    assert store.has_consumed_signal(signal.episode_key)
 
     restored = store.load()
 
@@ -1317,16 +1365,12 @@ def test_session_ledger_returns_detached_snapshot(
     assert after_entry is not session.ledger
 
 
-
 class _StubFastExitClient:
     def __init__(
         self,
         tickers: tuple[DeltaOptionTicker, ...],
     ) -> None:
-        self._tickers_by_symbol = {
-            ticker.symbol: ticker
-            for ticker in tickers
-        }
+        self._tickers_by_symbol = {ticker.symbol: ticker for ticker in tickers}
         self.calls: list[tuple[str, ...]] = []
 
     def fetch_option_tickers(

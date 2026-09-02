@@ -27,17 +27,17 @@ from nautilus_delta_options.paper.proposals import (
     build_ranked_paper_entry_proposals,
 )
 from nautilus_delta_options.paper.session import PaperLedgerSession
-from nautilus_delta_options.paper.signal_entries import (
+from nautilus_delta_options.paper.signal_entries_v32 import (
     PaperSignalEntryResult,
-    process_v31_call_signals,
+    process_v32_signals,
 )
 from nautilus_delta_options.selection.eligibility import (
     EligibilityConfig,
 )
 from nautilus_delta_options.signals.binance import BinanceCandleSnapshot
-from nautilus_delta_options.signals.v31 import (
-    V31CallSignal,
-    evaluate_v31_call_signal,
+from nautilus_delta_options.signals.v32 import (
+    V32Signal,
+    evaluate_v32_signal,
 )
 
 
@@ -68,7 +68,7 @@ class PaperDryRunCycle:
     closed_trades: tuple[PaperClosedTrade, ...]
     proposals: tuple[PaperEntryProposal, ...]
     warnings: tuple[str, ...]
-    signals: tuple[V31CallSignal, ...] = ()
+    signals: tuple[V32Signal, ...] = ()
     entry_results: tuple[PaperSignalEntryResult, ...] = ()
     entries_enabled: bool = False
     signal_error: str | None = None
@@ -180,17 +180,17 @@ class PaperDryRunObserver:
             excluded_product_ids=frozenset(trade.position.product_id for trade in closed_trades),
         )
 
-        signals: tuple[V31CallSignal, ...] = ()
+        signals: tuple[V32Signal, ...] = ()
         entry_results: tuple[PaperSignalEntryResult, ...] = ()
         signal_error: str | None = None
 
         if self._signal_client is not None:
             try:
                 signals = tuple(
-                    evaluate_v31_call_signal(self._signal_client.fetch_v31_candles(underlying))
+                    evaluate_v32_signal(self._signal_client.fetch_v31_candles(underlying))
                     for underlying in self._underlyings
                 )
-                entry_results = process_v31_call_signals(
+                entry_results = process_v32_signals(
                     signals,
                     snapshots,
                     session=self._session,
@@ -200,7 +200,7 @@ class PaperDryRunObserver:
                 )
             except Exception as error:
                 signal_error = str(error)
-                warnings.append(f"V3.1 signal processing failed: {error}")
+                warnings.append(f"V3.2 signal processing failed: {error}")
 
         return PaperDryRunCycle(
             captured_ns=captured_ns,
@@ -254,10 +254,7 @@ def _rank_global_proposals(
     excluded_product_ids: frozenset[int],
 ) -> tuple[PaperEntryProposal, ...]:
     ledger_snapshot = session.snapshot()
-    available_slots = (
-        ledger_snapshot.max_positions
-        - len(ledger_snapshot.open_positions)
-    )
+    available_slots = ledger_snapshot.max_positions - len(ledger_snapshot.open_positions)
 
     if available_slots <= 0:
         return ()
