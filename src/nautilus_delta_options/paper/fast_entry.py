@@ -5,8 +5,11 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
-from typing import Protocol
+from typing import Protocol, cast
 
+from nautilus_delta_options.delta.models import (
+    DeltaOptionTicker,
+)
 from nautilus_delta_options.delta.public_client import (
     DeltaOptionChainSnapshot,
     DeltaOptionProductsSnapshot,
@@ -17,7 +20,9 @@ from nautilus_delta_options.delta.snapshot import (
     build_market_snapshot,
 )
 from nautilus_delta_options.paper.proposals import (
+    PaperEntryProposal,
     PaperProposalConfig,
+    revalidate_paper_entry_proposal,
 )
 from nautilus_delta_options.paper.session import (
     PaperLedgerSession,
@@ -28,6 +33,9 @@ from nautilus_delta_options.paper.signal_entries_v32 import (
 )
 from nautilus_delta_options.selection.eligibility import (
     EligibilityConfig,
+)
+from nautilus_delta_options.selection.entry_safety import (
+    signal_is_fresh,
 )
 from nautilus_delta_options.signals.binance import (
     BinanceCandleSnapshot,
@@ -48,6 +56,11 @@ class DeltaFastEntryMarketData(Protocol):
         self,
         underlying: DeltaUnderlying,
     ) -> DeltaOptionProductsSnapshot: ...
+
+    def fetch_option_tickers(
+        self,
+        symbols: Sequence[str],
+    ) -> tuple[DeltaOptionTicker, ...]: ...
 
 
 class BinanceFastEntryMarketData(Protocol):
@@ -184,9 +197,132 @@ def run_fast_entry_cycle(
         for underlying in underlyings
     )
 
-    # This timestamp is intentionally taken after all fresh Delta
-    # snapshots have been received. process_v32_signals applies
-    # signal freshness and the existing proposal/portfolio gates.
+    warnings = [
+        f"{snapshot.underlying}: {error}"
+        for snapshot in snapshots
+        for error in snapshot.errors
+    ]
+
+    def revalidate_candidate(
+        signal: V32Signal,
+        proposal: PaperEntryProposal,
+    ) -> PaperEntryProposal | None:
+        try:
+            tickers = delta_client.fetch_option_tickers(
+                (proposal.record.product.symbol,),
+            )
+
+            if len(tickers) != 1:
+                raise ValueError(
+                    "Targeted Delta refresh did not "
+                    "return exactly one ticker"
+                )
+
+            received_ns = clock_ns()
+
+            if not signal_is_fresh(
+                candle_close_ms=signal.candle_close_ms,
+                observed_ns=received_ns,
+                config=proposal_config.entry_safety,
+            ):
+                warnings.append(
+                    f"{proposal.record.product.symbol}: "
+                    "signal became stale during final refresh"
+                )
+                return None
+
+            ticker = tickers[0]
+
+            latest_event_ns = (
+                ticker.exchange_timestamp * 1_000
+            )
+
+            max_future_skew_ns = int(
+                proposal_config.entry_safety
+                .max_future_skew_seconds
+                * Decimal("1000000000")
+            )
+
+            if (
+                latest_event_ns
+                > received_ns + max_future_skew_ns
+            ):
+                raise ValueError(
+                    "Delta timestamp is ahead of the VPS "
+                    "clock during final refresh"
+                )
+
+            captured_ns = max(
+                received_ns,
+                latest_event_ns,
+            )
+
+            refreshed_underlying = cast(
+                DeltaUnderlying,
+                proposal.record.ticker.underlying,
+            )
+
+            refreshed_snapshot = build_market_snapshot(
+                catalog=DeltaOptionProductsSnapshot(
+                    underlying=refreshed_underlying,
+                    products=(proposal.record.product,),
+                    rejected_records=(),
+                ),
+                chain=DeltaOptionChainSnapshot(
+                    underlying=refreshed_underlying,
+                    tickers=(ticker,),
+                    rejected_records=(),
+                ),
+                as_of=cycle_date,
+                captured_ns=captured_ns,
+                eligibility_config=resolved_eligibility,
+            )
+
+            refreshed_record = next(
+                (
+                    record
+                    for record
+                    in refreshed_snapshot.records
+                    if (
+                        record.product.product_id
+                        == proposal.record.product.product_id
+                        and record.product.symbol
+                        == proposal.record.product.symbol
+                    )
+                ),
+                None,
+            )
+
+            if refreshed_record is None:
+                warnings.append(
+                    f"{proposal.record.product.symbol}: "
+                    "final refreshed market record unavailable"
+                )
+                return None
+
+            refreshed = revalidate_paper_entry_proposal(
+                proposal,
+                refreshed_record,
+                ledger=session.snapshot(),
+                config=proposal_config,
+            )
+
+            if refreshed is None:
+                warnings.append(
+                    f"{proposal.record.product.symbol}: "
+                    "final payoff revalidation rejected"
+                )
+
+            return refreshed
+
+        except Exception as error:
+            warnings.append(
+                f"{proposal.record.product.symbol}: "
+                f"final refresh failed: {error}"
+            )
+            return None
+
+    # Timestamp after the initial BTC/ETH Delta snapshots.
     observed_ns = clock_ns()
 
     entry_results = process_v32_signals(
@@ -196,19 +332,14 @@ def run_fast_entry_cycle(
         entries_enabled=True,
         proposal_config=proposal_config,
         observed_ns=observed_ns,
-    )
-
-    warnings = tuple(
-        f"{snapshot.underlying}: {error}"
-        for snapshot in snapshots
-        for error in snapshot.errors
+        candidate_revalidator=revalidate_candidate,
     )
 
     return PaperFastEntryCycle(
         candle_close_ms=candle_close_ms,
         signals=signals,
         entry_results=entry_results,
-        warnings=warnings,
+        warnings=tuple(warnings),
     )
 
 

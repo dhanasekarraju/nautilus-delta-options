@@ -162,6 +162,102 @@ def build_paper_entry_proposal(
     )
 
 
+def revalidate_paper_entry_proposal(
+    proposal: PaperEntryProposal,
+    fresh_record: DeltaOptionMarketRecord,
+    *,
+    ledger: PaperLedger,
+    config: PaperProposalConfig | None = None,
+) -> PaperEntryProposal | None:
+    """Re-price an approved proposal without moving its payoff levels.
+
+    The original stop/target levels remain frozen. A fresh entry ask
+    must still satisfy the same safety, sizing, fees, and minimum net
+    reward/risk requirements. This prevents a late premium move from
+    being chased by simply moving the target higher.
+    """
+
+    resolved = config or PaperProposalConfig()
+
+    original = proposal.record
+
+    identity = (
+        fresh_record.product.product_id,
+        fresh_record.product.symbol,
+        fresh_record.ticker.underlying,
+        fresh_record.ticker.contract_type,
+    )
+    expected = (
+        original.product.product_id,
+        original.product.symbol,
+        original.ticker.underlying,
+        original.ticker.contract_type,
+    )
+
+    if identity != expected:
+        raise ValueError(
+            "Fresh proposal record does not match "
+            "the original contract"
+        )
+
+    if not fresh_record.eligibility.eligible:
+        return None
+
+    if fresh_record.quote is None:
+        return None
+
+    if len(ledger.open_positions) >= ledger.max_positions:
+        return None
+
+    if any(
+        position.product_id
+        == fresh_record.product.product_id
+        for position in ledger.open_positions
+    ):
+        return None
+
+    safety = evaluate_option_entry_safety(
+        fresh_record,
+        observed_ns=fresh_record.quote.ts_init,
+        config=resolved.entry_safety,
+    )
+
+    if not safety.approved:
+        return None
+
+    levels = proposal.levels
+
+    account_equity = ledger.cash + sum(
+        (
+            position.entry_debit
+            for position in ledger.open_positions
+        ),
+        Decimal("0"),
+    )
+
+    sizing = size_long_option_position(
+        fresh_record,
+        account_equity=account_equity,
+        available_cash=ledger.cash,
+        stop_exit_bid=levels.stop_exit_bid,
+        target_exit_bid=levels.target_exit_bid,
+        stop_spot=levels.stop_spot,
+        target_spot=levels.target_spot,
+        minimum_reward_risk=ledger.minimum_reward_risk,
+        gst_rate=ledger.gst_rate,
+        config=resolved.sizing,
+    )
+
+    if not sizing.approved:
+        return None
+
+    return PaperEntryProposal(
+        record=fresh_record,
+        levels=levels,
+        sizing=sizing,
+    )
+
+
 def build_ranked_paper_entry_proposals(
     snapshot: DeltaMarketSnapshot,
     *,

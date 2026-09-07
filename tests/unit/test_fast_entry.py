@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -228,6 +229,7 @@ def _ticker(
     product_id: int,
     bid: str,
     observed_ns: int,
+    ask: str = "1000",
 ) -> DeltaOptionTicker:
     prefix = (
         "C"
@@ -251,7 +253,7 @@ def _ticker(
         contract_value=Decimal("0.001"),
         tick_size=Decimal("0.1"),
         best_bid=Decimal(bid),
-        best_ask=Decimal("1000"),
+        best_ask=Decimal(ask),
         bid_size=Decimal("1000"),
         ask_size=Decimal("1000"),
         mark_iv=Decimal("0.5"),
@@ -286,6 +288,8 @@ class _DeltaClient:
             DeltaOptionContractType,
         ],
         bids: dict[DeltaUnderlying, str] | None = None,
+        refresh_bids: dict[DeltaUnderlying, str] | None = None,
+        refresh_asks: dict[DeltaUnderlying, str] | None = None,
     ) -> None:
         self._observed_ns = observed_ns
         self._contract_types = contract_types
@@ -293,15 +297,68 @@ class _DeltaClient:
             "BTC": "995",
             "ETH": "995",
         }
+        self._refresh_bids = refresh_bids or self._bids
+        self._refresh_asks = refresh_asks or {
+            "BTC": "1000",
+            "ETH": "1000",
+        }
 
         self.product_calls: list[DeltaUnderlying] = []
         self.chain_calls: list[DeltaUnderlying] = []
+        self.ticker_calls: list[tuple[str, ...]] = []
 
     @staticmethod
     def _product_id(
         underlying: DeltaUnderlying,
     ) -> int:
         return 1 if underlying == "BTC" else 2
+
+    def fetch_option_tickers(
+        self,
+        symbols: Sequence[str],
+    ) -> tuple[DeltaOptionTicker, ...]:
+        if len(symbols) != 1:
+            raise AssertionError(
+                "Fast-entry final refresh expects "
+                "exactly one option symbol"
+            )
+
+        requested = tuple(symbols)
+        self.ticker_calls.append(requested)
+
+        symbol = requested[0]
+
+        underlying: DeltaUnderlying
+
+        if "-BTC-" in symbol:
+            underlying = "BTC"
+        elif "-ETH-" in symbol:
+            underlying = "ETH"
+        else:
+            raise AssertionError(
+                f"Unexpected option symbol: {symbol}"
+            )
+
+        ticker = _ticker(
+            underlying=underlying,
+            contract_type=(
+                self._contract_types[underlying]
+            ),
+            product_id=self._product_id(
+                underlying
+            ),
+            bid=self._refresh_bids[underlying],
+            observed_ns=self._observed_ns,
+            ask=self._refresh_asks[underlying],
+        )
+
+        if ticker.symbol != symbol:
+            raise AssertionError(
+                "Targeted refresh returned wrong symbol: "
+                f"expected={symbol}, actual={ticker.symbol}"
+            )
+
+        return (ticker,)
 
     def fetch_option_products(
         self,
@@ -702,4 +759,113 @@ def test_same_candle_correlation_arbitration_is_preserved(
     assert btc.episode_key == eth.episode_key
     assert store.has_consumed_signal(
         btc.episode_key
+    )
+
+
+
+def test_fresh_premium_jump_is_rejected_without_chasing_payoff(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session, store = _session(tmp_path)
+
+    btc = _signal(
+        underlying="BTC",
+        decision=V32SignalDecision.CALL,
+    )
+    eth = _signal(
+        underlying="ETH",
+        decision=V32SignalDecision.NONE,
+    )
+
+    _install_signals(
+        monkeypatch,
+        {
+            "BTC": btc,
+            "ETH": eth,
+        },
+    )
+
+    observed_ns = (
+        BASE_CANDLE_CLOSE_MS * 1_000_000
+        + 2_000_000_000
+    )
+
+    delta_client = _DeltaClient(
+        observed_ns=observed_ns,
+        contract_types={
+            "BTC": "call_options",
+            "ETH": "call_options",
+        },
+        # Initial proposal:
+        # bid 995 / ask 1000.
+        bids={
+            "BTC": "995",
+            "ETH": "995",
+        },
+        # Immediately before opening, BTC premium has
+        # already run to bid 1095 / ask 1100.
+        refresh_bids={
+            "BTC": "1095",
+            "ETH": "995",
+        },
+        refresh_asks={
+            "BTC": "1100",
+            "ETH": "1000",
+        },
+    )
+
+    cycle = fast_entry.run_fast_entry_cycle(
+        delta_client=delta_client,
+        signal_client=_SignalClient(
+            {
+                "BTC": BASE_CANDLE_CLOSE_MS,
+                "ETH": BASE_CANDLE_CLOSE_MS,
+            }
+        ),
+        session=session,
+        entries_enabled=True,
+        proposal_config=_proposal_config(),
+        clock_ns=lambda: observed_ns,
+        as_of=AS_OF,
+    )
+
+    btc_result = cycle.entry_results[0]
+
+    assert btc_result.status is (
+        PaperSignalEntryStatus.REVALIDATION_REJECTED
+    )
+
+    # The originally approved payoff structure was based
+    # on ask=1000. Those levels must NOT move upward just
+    # because the fresh premium has already run to 1100.
+    assert btc_result.proposal is not None
+    assert (
+        btc_result.proposal.record.ticker.best_ask
+        == Decimal("1000")
+    )
+    assert (
+        btc_result.proposal.levels.stop_exit_bid
+        == Decimal("900")
+    )
+    assert (
+        btc_result.proposal.levels.target_exit_bid
+        == Decimal("1200")
+    )
+
+    assert session.ledger.open_positions == ()
+
+    # Rejected revalidation must not consume the episode.
+    assert not store.has_consumed_signal(
+        btc.episode_key
+    )
+
+    assert delta_client.ticker_calls == [
+        ("C-BTC-80000-300826",),
+    ]
+
+    assert any(
+        "final payoff revalidation rejected"
+        in warning
+        for warning in cycle.warnings
     )
