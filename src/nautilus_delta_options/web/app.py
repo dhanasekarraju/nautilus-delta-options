@@ -15,6 +15,9 @@ from fastapi.responses import HTMLResponse
 from nautilus_delta_options.delta.public_client import (
     DeltaPublicClient,
 )
+from nautilus_delta_options.paper.fast_entry import (
+    run_fast_entry_cycle,
+)
 from nautilus_delta_options.paper.fast_exit import (
     run_fast_exit_cycle,
 )
@@ -26,7 +29,13 @@ from nautilus_delta_options.paper.observer import (
 from nautilus_delta_options.paper.persistence import (
     SQLitePaperLedgerStore,
 )
+from nautilus_delta_options.paper.proposals import (
+    PaperProposalConfig,
+)
 from nautilus_delta_options.paper.session import PaperLedgerSession
+from nautilus_delta_options.selection.entry_safety import (
+    EntrySafetyConfig,
+)
 from nautilus_delta_options.signals.binance import BinanceFuturesPublicClient
 from nautilus_delta_options.signals.v32 import (
     V32Signal,
@@ -51,6 +60,7 @@ def create_app(
     *,
     database: Path | None = None,
     interval_seconds: int | None = None,
+    entry_interval_seconds: int | None = None,
     exit_interval_seconds: int | None = None,
     entries_enabled: bool | None = None,
 ) -> FastAPI:
@@ -64,6 +74,15 @@ def create_app(
         "OBSERVER_INTERVAL_SECONDS",
         60,
     )
+    resolved_entry_interval = (
+        entry_interval_seconds
+        if entry_interval_seconds is not None
+        else _integer_env(
+            "FAST_ENTRY_INTERVAL_SECONDS",
+            2,
+        )
+    )
+
     resolved_exit_interval = (
         exit_interval_seconds
         if exit_interval_seconds is not None
@@ -72,6 +91,9 @@ def create_app(
             5,
         )
     )
+
+    if resolved_entry_interval <= 0:
+        raise ValueError("FAST_ENTRY_INTERVAL_SECONDS must be positive")
 
     if resolved_exit_interval <= 0:
         raise ValueError("POSITION_EXIT_INTERVAL_SECONDS must be positive")
@@ -99,12 +121,23 @@ def create_app(
     )
     delta_client = DeltaPublicClient()
     signal_client = BinanceFuturesPublicClient()
+
+    fast_entry_proposal_config = PaperProposalConfig(
+        entry_safety=EntrySafetyConfig(
+            max_signal_age_seconds=Decimal("15"),
+        ),
+    )
+
+    # The slow observer must never own new entries once the
+    # dedicated fast-entry task exists. It continues to serve
+    # dashboard, proposal, and time-exit responsibilities.
     observer = PaperDryRunObserver(
         client=delta_client,
         session=session,
         signal_client=signal_client,
-        entries_enabled=resolved_entries_enabled,
+        entries_enabled=False,
     )
+
     state = DashboardState(resolved_entries_enabled)
 
     @asynccontextmanager
@@ -114,9 +147,22 @@ def create_app(
                 observer=observer,
                 session=session,
                 state=state,
+                entries_enabled=resolved_entries_enabled,
                 interval_seconds=resolved_interval,
             )
         )
+
+        fast_entry_task = asyncio.create_task(
+            _poll_fast_entries(
+                client=delta_client,
+                signal_client=signal_client,
+                session=session,
+                entries_enabled=resolved_entries_enabled,
+                proposal_config=fast_entry_proposal_config,
+                interval_seconds=resolved_entry_interval,
+            )
+        )
+
         fast_exit_task = asyncio.create_task(
             _poll_fast_exits(
                 client=delta_client,
@@ -126,6 +172,7 @@ def create_app(
         )
         tasks = (
             polling_task,
+            fast_entry_task,
             fast_exit_task,
         )
 
@@ -181,7 +228,10 @@ def create_app(
                 "status",
                 "unknown",
             ),
-            "entries_enabled": observer.entries_enabled,
+            "entries_enabled": resolved_entries_enabled,
+            "entry_owner": "fast_entry",
+            "observer_entries_enabled": observer.entries_enabled,
+            "fast_entry_interval_seconds": resolved_entry_interval,
             "position_exit_interval_seconds": resolved_exit_interval,
         }
 
@@ -193,6 +243,7 @@ async def _poll_dashboard(
     observer: PaperDryRunObserver,
     session: PaperLedgerSession,
     state: DashboardState,
+    entries_enabled: bool,
     interval_seconds: int,
 ) -> None:
     while True:
@@ -201,16 +252,68 @@ async def _poll_dashboard(
             state.payload = _dashboard_payload(
                 cycle,
                 session.ledger,
+                entries_enabled=entries_enabled,
             )
         except asyncio.CancelledError:
             raise
         except Exception as error:
             state.payload = {
                 "status": "error",
-                "entries_enabled": observer.entries_enabled,
+                "entries_enabled": entries_enabled,
                 "updated_at": datetime.now(UTC).isoformat(),
                 "message": str(error),
             }
+
+        await asyncio.sleep(interval_seconds)
+
+
+async def _poll_fast_entries(
+    *,
+    client: DeltaPublicClient,
+    signal_client: BinanceFuturesPublicClient,
+    session: PaperLedgerSession,
+    entries_enabled: bool,
+    proposal_config: PaperProposalConfig,
+    interval_seconds: int,
+) -> None:
+    previous_candle_close_ms: int | None = None
+
+    while True:
+        try:
+            cycle = await asyncio.to_thread(
+                run_fast_entry_cycle,
+                delta_client=client,
+                signal_client=signal_client,
+                session=session,
+                entries_enabled=entries_enabled,
+                proposal_config=proposal_config,
+                previous_candle_close_ms=previous_candle_close_ms,
+            )
+
+            if cycle.candle_close_ms is not None:
+                previous_candle_close_ms = cycle.candle_close_ms
+
+            for result in cycle.entry_results:
+                if result.position is not None:
+                    _LOGGER.info(
+                        "FAST_ENTRY trade_id=%s underlying=%s "
+                        "decision=%s symbol=%s",
+                        result.position.trade_id,
+                        result.signal.underlying,
+                        result.signal.decision.value,
+                        result.position.symbol,
+                    )
+
+            for warning in cycle.warnings:
+                _LOGGER.warning(
+                    "FAST_ENTRY_WARNING %s",
+                    warning,
+                )
+
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _LOGGER.exception("FAST_ENTRY_CYCLE_FAILED")
 
         await asyncio.sleep(interval_seconds)
 
@@ -256,10 +359,12 @@ async def _poll_fast_exits(
 def _dashboard_payload(
     cycle: PaperDryRunCycle,
     ledger: PaperLedger,
+    *,
+    entries_enabled: bool,
 ) -> dict[str, object]:
     return {
         "status": "ready",
-        "entries_enabled": cycle.entries_enabled,
+        "entries_enabled": entries_enabled,
         "updated_at": datetime.now(UTC).isoformat(),
         "cycle_date": cycle.as_of.isoformat(),
         "wallet": {

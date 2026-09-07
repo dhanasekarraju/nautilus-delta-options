@@ -13,6 +13,7 @@ from nautilus_delta_options.delta.snapshot import (
     build_market_snapshot,
 )
 from nautilus_delta_options.paper.persistence import SQLitePaperLedgerStore
+from nautilus_delta_options.paper.proposals import PaperEntryProposal
 from nautilus_delta_options.paper.session import PaperLedgerSession
 from nautilus_delta_options.paper.signal_entries_v32 import (
     PaperSignalEntryStatus,
@@ -446,3 +447,80 @@ def test_put_signal_never_selects_call(
     assert result.status is (PaperSignalEntryStatus.NO_PUT_PROPOSAL)
     assert result.position is None
     assert session.ledger.open_positions == ()
+
+
+def test_revalidation_rejection_falls_through_to_next_candidate(
+    tmp_path: Path,
+) -> None:
+    session, store = _session(tmp_path)
+
+    btc = _signal(
+        underlying="BTC",
+        decision=V32SignalDecision.CALL,
+    )
+    eth = _signal(
+        underlying="ETH",
+        decision=V32SignalDecision.CALL,
+    )
+
+    # BTC is initially ranked first because its spread is
+    # tighter. Revalidation rejects BTC, so ETH must be
+    # allowed to become the episode winner.
+    btc_snapshot = _snapshot(
+        underlying="BTC",
+        contract_type="call_options",
+        product_id=101,
+        bid="995",
+        ask="1000",
+    )
+    eth_snapshot = _snapshot(
+        underlying="ETH",
+        contract_type="call_options",
+        product_id=102,
+        bid="980",
+        ask="1000",
+    )
+
+    seen: list[str] = []
+
+    def revalidate(
+        signal: V32Signal,
+        proposal: PaperEntryProposal,
+    ) -> PaperEntryProposal | None:
+        seen.append(signal.underlying)
+
+        if signal.underlying == "BTC":
+            return None
+
+        return proposal
+
+    results = process_v32_signals(
+        (btc, eth),
+        (btc_snapshot, eth_snapshot),
+        session=session,
+        entries_enabled=True,
+        observed_ns=(
+            BASE_CANDLE_CLOSE_MS * 1_000_000
+        ),
+        candidate_revalidator=revalidate,
+    )
+
+    assert results[0].status is (
+        PaperSignalEntryStatus.REVALIDATION_REJECTED
+    )
+    assert results[1].status is (
+        PaperSignalEntryStatus.OPENED
+    )
+
+    assert seen == ["BTC", "ETH"]
+
+    assert len(session.ledger.open_positions) == 1
+    assert (
+        session.ledger.open_positions[0].underlying
+        == "ETH"
+    )
+
+    assert btc.episode_key == eth.episode_key
+    assert store.has_consumed_signal(
+        eth.episode_key
+    )

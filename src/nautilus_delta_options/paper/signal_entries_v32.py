@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import cast
@@ -46,6 +46,7 @@ class PaperSignalEntryStatus(StrEnum):
     NO_CALL_PROPOSAL = "no_call_proposal"
     NO_PUT_PROPOSAL = "no_put_proposal"
     RISK_REJECTED = "risk_rejected"
+    REVALIDATION_REJECTED = "revalidation_rejected"
     STALE_SIGNAL = "stale_signal"
     DIRECTION_BLOCKED = "direction_blocked"
     CORRELATED_SIGNAL_SKIPPED = "correlated_signal_skipped"
@@ -62,6 +63,12 @@ class PaperSignalEntryResult:
         PortfolioRiskDecision,
         ...,
     ]
+
+
+type CandidateRevalidator = Callable[
+    [V32Signal, PaperEntryProposal],
+    PaperEntryProposal | None,
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +91,7 @@ def process_v32_signal(
     proposal_config: PaperProposalConfig | None = None,
     portfolio_config: PortfolioRiskConfig | None = None,
     observed_ns: int | None = None,
+    candidate_revalidator: CandidateRevalidator | None = None,
 ) -> PaperSignalEntryResult:
     return process_v32_signals(
         (signal,),
@@ -93,6 +101,7 @@ def process_v32_signal(
         proposal_config=proposal_config,
         portfolio_config=portfolio_config,
         observed_ns=observed_ns,
+        candidate_revalidator=candidate_revalidator,
     )[0]
 
 
@@ -105,6 +114,7 @@ def process_v32_signals(
     proposal_config: PaperProposalConfig | None = None,
     portfolio_config: PortfolioRiskConfig | None = None,
     observed_ns: int | None = None,
+    candidate_revalidator: CandidateRevalidator | None = None,
 ) -> tuple[PaperSignalEntryResult, ...]:
     results: list[PaperSignalEntryResult | None] = [None] * len(signals)
 
@@ -225,37 +235,98 @@ def process_v32_signals(
                         )
                 break
 
-            # Re-run portfolio risk immediately before
-            # mutation. This keeps the final opening gate
-            # based on the current synchronized ledger.
+            proposal = candidate.proposal
+
+            # Fast-entry may optionally replace the originally
+            # ranked proposal with one rebuilt from a targeted
+            # fresh quote immediately before mutation.
+            #
+            # The callback returns None when the refreshed
+            # contract no longer satisfies the existing
+            # payoff / safety / sizing requirements. In that
+            # case the next ranked candidate may be tried.
+            if candidate_revalidator is not None:
+                refreshed = candidate_revalidator(
+                    signal,
+                    proposal,
+                )
+
+                if refreshed is None:
+                    results[candidate.index] = _result(
+                        PaperSignalEntryStatus.REVALIDATION_REJECTED,
+                        signal,
+                        proposal=proposal,
+                        risk_decisions=(
+                            candidate.risk_decisions
+                        ),
+                    )
+                    continue
+
+                proposal = refreshed
+
+            # Re-snapshot after optional revalidation so the
+            # final portfolio gate uses synchronized ledger
+            # state immediately before mutation.
+            ledger_snapshot = session.snapshot()
+
+            if _has_directional_position(
+                ledger_snapshot.open_positions,
+                contract_type,
+            ):
+                for unresolved in candidates:
+                    if results[unresolved.index] is None:
+                        results[unresolved.index] = _result(
+                            PaperSignalEntryStatus.DIRECTION_BLOCKED,
+                            unresolved.signal,
+                            proposal=(unresolved.proposal),
+                            risk_decisions=(unresolved.risk_decisions),
+                        )
+                break
+
             current_risk = evaluate_portfolio_entry(
                 ledger_snapshot,
-                candidate.proposal,
+                proposal,
                 config=portfolio_config,
             )
 
-            risk_decisions = candidate.risk_decisions + (current_risk,)
+            risk_decisions = (
+                candidate.risk_decisions
+                + (current_risk,)
+            )
 
             if not current_risk.approved:
                 results[candidate.index] = _result(
                     PaperSignalEntryStatus.RISK_REJECTED,
                     signal,
-                    proposal=(candidate.proposal),
-                    risk_decisions=(risk_decisions),
+                    proposal=proposal,
+                    risk_decisions=risk_decisions,
                 )
                 continue
 
             try:
                 position = session.open_long_for_signal(
-                    candidate.proposal.record,
+                    proposal.record,
                     signal_key=(signal.episode_key),
                     signal_underlying=(signal.underlying),
-                    candle_closed_ns=(signal.candle_close_ms * 1_000_000),
-                    contracts=(candidate.proposal.sizing.contracts),
-                    stop_exit_bid=(candidate.proposal.levels.stop_exit_bid),
-                    target_exit_bid=(candidate.proposal.levels.target_exit_bid),
-                    stop_spot=(candidate.proposal.levels.stop_spot),
-                    target_spot=(candidate.proposal.levels.target_spot),
+                    candle_closed_ns=(
+                        signal.candle_close_ms
+                        * 1_000_000
+                    ),
+                    contracts=(
+                        proposal.sizing.contracts
+                    ),
+                    stop_exit_bid=(
+                        proposal.levels.stop_exit_bid
+                    ),
+                    target_exit_bid=(
+                        proposal.levels.target_exit_bid
+                    ),
+                    stop_spot=(
+                        proposal.levels.stop_spot
+                    ),
+                    target_spot=(
+                        proposal.levels.target_spot
+                    ),
                 )
             except PaperSignalAlreadyConsumedError:
                 for unresolved in candidates:
@@ -271,7 +342,7 @@ def process_v32_signals(
             results[candidate.index] = _result(
                 PaperSignalEntryStatus.OPENED,
                 signal,
-                proposal=candidate.proposal,
+                proposal=proposal,
                 position=position,
                 risk_decisions=risk_decisions,
             )
