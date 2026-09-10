@@ -501,13 +501,9 @@ def _direction_score(
     if side * r30 > 0:
         score += 14
 
-    if side > 0 and 50 <= rsi <= 70:
+    if (side > 0 and 50 <= rsi <= 70) or (side < 0 and 30 <= rsi <= 50):
         score += 12
-    elif side < 0 and 30 <= rsi <= 50:
-        score += 12
-    elif side > 0 and rsi > 75:
-        score -= 8
-    elif side < 0 and rsi < 25:
+    elif (side > 0 and rsi > 75) or (side < 0 and rsi < 25):
         score -= 8
 
     score += 8 if adx >= 20 else (-8 if adx < 15 else 0)

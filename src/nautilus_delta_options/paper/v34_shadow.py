@@ -4,7 +4,7 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
-from typing import Protocol
+from typing import Protocol, cast
 
 from nautilus_delta_options.delta.history import DeltaCandleSnapshot
 from nautilus_delta_options.delta.public_client import (
@@ -211,7 +211,8 @@ class V34ShadowObserver:
 
         # Commit rolling state only after both BTC and ETH were evaluated.
         for signal in signals:
-            self._previous_chains[signal.underlying] = signal.chain_state
+            underlying = cast(DeltaUnderlying, signal.underlying)
+            self._previous_chains[underlying] = signal.chain_state
         self._last_candle_close_ms = candle_close_ms
 
         return V34ShadowCycle(
@@ -236,7 +237,9 @@ def v34_shadow_cycle_payload(cycle: V34ShadowCycle) -> dict[str, object]:
         "signals": [
             v34_shadow_signal_payload(
                 signal,
-                quality_by_underlying.get(signal.underlying),
+                quality_by_underlying.get(
+                    cast(DeltaUnderlying, signal.underlying)
+                ),
             )
             for signal in cycle.signals
         ],

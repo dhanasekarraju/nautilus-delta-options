@@ -10,7 +10,6 @@ from nautilus_delta_options.selection.v34_quality import (
     rank_v34_contract_quality,
 )
 
-
 AS_OF = date(2026, 9, 10)
 
 
@@ -120,13 +119,13 @@ def test_better_buy_side_quality_ranks_first() -> None:
     weak = _ticker(
         "C-WEAK",
         delta="0.63",
-        bid="98",
+        bid="98.6",
         ask="100",
         gamma="0.00010",
         theta="-8",
         vega="5",
         mark_iv="0.55",
-        oi="10",
+        oi="100",
         volume="1",
         bid_size="2",
         ask_size="2",

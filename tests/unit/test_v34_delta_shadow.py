@@ -346,6 +346,18 @@ def test_shadow_can_authorize_call_only_after_flow_confirmation(monkeypatch) -> 
             expiry=date(2026, 9, 11),
             delta="-0.50",
         ),
+        _ticker(
+            symbol="C-BTC-78200-110926",
+            contract_type="call_options",
+            expiry=date(2026, 9, 11),
+            delta="0.45",
+        ),
+        _ticker(
+            symbol="P-BTC-77800-110926",
+            contract_type="put_options",
+            expiry=date(2026, 9, 11),
+            delta="-0.45",
+        ),
     )
     previous = build_v34_chain_state(
         chain,
@@ -364,6 +376,7 @@ def test_shadow_can_authorize_call_only_after_flow_confirmation(monkeypatch) -> 
 
     assert signal.decision is V34Decision.CALL
     assert signal.call_score > signal.put_score
+
 
 def test_ticker_parser_prefers_top_level_mark_vol() -> None:
     raw = {
