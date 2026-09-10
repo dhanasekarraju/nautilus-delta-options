@@ -499,3 +499,187 @@ def test_shadow_blocks_low_adx_even_with_strong_put_scores(monkeypatch) -> None:
     assert signal.decision is V34Decision.WAIT
     assert "weak_trend_regime" in signal.reasons
 
+
+
+def test_flow_does_not_treat_oi_and_volume_alone_as_directional_confirmation() -> None:
+    previous = V34ChainState(
+        underlying="BTC",
+        captured_ns=1,
+        contracts=(
+            V34ContractState(
+                symbol="C1",
+                contract_type="call_options",
+                iv=0.40,
+                mark_price=100,
+                open_interest=100,
+                volume=100,
+                bid_size=100,
+                ask_size=100,
+            ),
+            V34ContractState(
+                symbol="P1",
+                contract_type="put_options",
+                iv=0.40,
+                mark_price=100,
+                open_interest=100,
+                volume=100,
+                bid_size=100,
+                ask_size=100,
+            ),
+        ),
+    )
+    current = V34ChainState(
+        underlying="BTC",
+        captured_ns=301_000_000_001,
+        contracts=(
+            V34ContractState(
+                symbol="C1",
+                contract_type="call_options",
+                iv=0.40,
+                mark_price=100,
+                open_interest=150,
+                volume=180,
+                bid_size=100,
+                ask_size=100,
+            ),
+            V34ContractState(
+                symbol="P1",
+                contract_type="put_options",
+                iv=0.40,
+                mark_price=100,
+                open_interest=100,
+                volume=110,
+                bid_size=100,
+                ask_size=100,
+            ),
+        ),
+    )
+
+    flow = evaluate_v34_chain_flow(previous, current)
+
+    assert flow.oi_edge > 0
+    assert flow.volume_edge > 0
+    assert flow.premium_edge == pytest.approx(0)
+    assert flow.iv_edge == pytest.approx(0)
+    assert flow.depth_edge == pytest.approx(0)
+    assert flow.call_score == pytest.approx(0)
+    assert flow.call_confirmations == 0
+
+
+def test_flow_volume_drop_is_not_converted_into_false_surge() -> None:
+    previous = V34ChainState(
+        underlying="BTC",
+        captured_ns=1,
+        contracts=(
+            V34ContractState(
+                symbol="C1",
+                contract_type="call_options",
+                iv=0.40,
+                mark_price=100,
+                open_interest=100,
+                volume=1000,
+                bid_size=100,
+                ask_size=100,
+            ),
+            V34ContractState(
+                symbol="P1",
+                contract_type="put_options",
+                iv=0.40,
+                mark_price=100,
+                open_interest=100,
+                volume=100,
+                bid_size=100,
+                ask_size=100,
+            ),
+        ),
+    )
+    current = V34ChainState(
+        underlying="BTC",
+        captured_ns=301_000_000_001,
+        contracts=(
+            V34ContractState(
+                symbol="C1",
+                contract_type="call_options",
+                iv=0.40,
+                mark_price=100,
+                open_interest=100,
+                volume=10,
+                bid_size=100,
+                ask_size=100,
+            ),
+            V34ContractState(
+                symbol="P1",
+                contract_type="put_options",
+                iv=0.40,
+                mark_price=100,
+                open_interest=100,
+                volume=120,
+                bid_size=100,
+                ask_size=100,
+            ),
+        ),
+    )
+
+    flow = evaluate_v34_chain_flow(previous, current)
+
+    assert flow.volume_edge < 0
+
+
+def test_flow_depth_uses_change_not_static_imbalance() -> None:
+    previous = V34ChainState(
+        underlying="BTC",
+        captured_ns=1,
+        contracts=(
+            V34ContractState(
+                symbol="C1",
+                contract_type="call_options",
+                iv=0.40,
+                mark_price=100,
+                open_interest=100,
+                volume=100,
+                bid_size=200,
+                ask_size=100,
+            ),
+            V34ContractState(
+                symbol="P1",
+                contract_type="put_options",
+                iv=0.40,
+                mark_price=100,
+                open_interest=100,
+                volume=100,
+                bid_size=100,
+                ask_size=100,
+            ),
+        ),
+    )
+    current = V34ChainState(
+        underlying="BTC",
+        captured_ns=301_000_000_001,
+        contracts=(
+            V34ContractState(
+                symbol="C1",
+                contract_type="call_options",
+                iv=0.40,
+                mark_price=100,
+                open_interest=100,
+                volume=100,
+                bid_size=200,
+                ask_size=100,
+            ),
+            V34ContractState(
+                symbol="P1",
+                contract_type="put_options",
+                iv=0.40,
+                mark_price=100,
+                open_interest=100,
+                volume=100,
+                bid_size=100,
+                ask_size=100,
+            ),
+        ),
+    )
+
+    flow = evaluate_v34_chain_flow(previous, current)
+
+    assert flow.depth_edge == pytest.approx(0)
+    assert flow.call_confirmations == 0

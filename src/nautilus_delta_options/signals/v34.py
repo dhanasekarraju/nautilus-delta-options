@@ -270,23 +270,31 @@ def evaluate_v34_chain_flow(
         new_oi = sum(max(b.open_interest, 0) for _, b in pairs)
         oi_change = (new_oi - old_oi) / max(old_oi, 1.0)
 
+        # Delta ticker volume is a rolling aggregate, not an execution-side
+        # aggressor feed. Only positive net change is usable as weak support;
+        # a decrease/reset must never be converted into a synthetic surge.
         vol_delta = sum(
-            b.volume - a.volume if b.volume >= a.volume else b.volume
+            max(b.volume - a.volume, 0.0)
             for a, b in pairs
         )
         iv_change = float(median(b.iv - a.iv for a, b in pairs))
         premium = float(
             median(b.mark_price / a.mark_price - 1.0 for a, b in pairs if a.mark_price > 0)
         )
-        bid = sum(b.bid_size for _, b in pairs)
-        ask = sum(b.ask_size for _, b in pairs)
-        depth = (bid - ask) / max(bid + ask, 1.0)
+        old_bid = sum(a.bid_size for a, _ in pairs)
+        old_ask = sum(a.ask_size for a, _ in pairs)
+        new_bid = sum(b.bid_size for _, b in pairs)
+        new_ask = sum(b.ask_size for _, b in pairs)
+
+        old_depth = (old_bid - old_ask) / max(old_bid + old_ask, 1.0)
+        new_depth = (new_bid - new_ask) / max(new_bid + new_ask, 1.0)
+        depth_change = new_depth - old_depth
 
         metrics[side] = {
             "iv": iv_change,
             "oi": oi_change,
-            "vol": max(vol_delta, 0.0),
-            "depth": depth,
+            "vol": vol_delta,
+            "depth": depth_change,
             "premium": premium,
         }
 
@@ -513,18 +521,44 @@ def _flow_score(
     depth_edge: float,
     premium_edge: float,
 ) -> tuple[float, int]:
+    """Score directional option flow conservatively.
+
+    Premium, IV and depth-change can contribute primary confirmations.
+    OI and aggregate volume are ambiguous without price/volatility context:
+    writers can increase OI and ticker volume does not identify aggressor side.
+    They therefore count only when corroborated by primary evidence.
+    """
+
     score = 0.0
     confirms = 0
-    for condition, points in (
-        (iv_edge > 0.002, 7.0),
-        (oi_edge > 0.01, 6.0),
-        (volume_edge > 0.10, 5.0),
-        (depth_edge > 0.10, 4.0),
-        (premium_edge > 0.005, 8.0),
-    ):
-        if condition:
-            score += points
-            confirms += 1
+
+    premium_confirm = premium_edge > 0.005
+    iv_confirm = iv_edge > 0.002
+    depth_confirm = depth_edge > 0.10
+
+    if premium_confirm:
+        score += 10.0
+        confirms += 1
+    if iv_confirm:
+        score += 8.0
+        confirms += 1
+    if depth_confirm:
+        score += 5.0
+        confirms += 1
+
+    # OI is directional support only when option premium or IV is already
+    # moving in the same direction. OI by itself cannot distinguish buying
+    # from writing.
+    if oi_edge > 0.01 and (premium_confirm or iv_confirm):
+        score += 4.0
+        confirms += 1
+
+    # Volume is also supporting evidence only. It is an aggregate ticker
+    # quantity, not signed aggressor flow.
+    if volume_edge > 0.10 and (premium_confirm or depth_confirm):
+        score += 3.0
+        confirms += 1
+
     return score, confirms
 
 

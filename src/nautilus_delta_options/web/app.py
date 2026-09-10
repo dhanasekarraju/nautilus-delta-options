@@ -12,6 +12,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 
+from nautilus_delta_options.delta.history import DeltaHistoryClient
 from nautilus_delta_options.delta.public_client import (
     DeltaPublicClient,
 )
@@ -33,6 +34,10 @@ from nautilus_delta_options.paper.proposals import (
     PaperProposalConfig,
 )
 from nautilus_delta_options.paper.session import PaperLedgerSession
+from nautilus_delta_options.paper.v34_shadow import (
+    V34ShadowObserver,
+    v34_shadow_cycle_payload,
+)
 from nautilus_delta_options.selection.entry_safety import (
     EntrySafetyConfig,
 )
@@ -56,12 +61,25 @@ class DashboardState:
         }
 
 
+class V34ShadowState:
+    def __init__(self) -> None:
+        self.payload: dict[str, object] = {
+            "status": "warming_up",
+            "entry_authority": False,
+            "updated_at": None,
+            "candle_close_ms": None,
+            "signals": [],
+            "warnings": [],
+        }
+
+
 def create_app(
     *,
     database: Path | None = None,
     interval_seconds: int | None = None,
     entry_interval_seconds: int | None = None,
     exit_interval_seconds: int | None = None,
+    v34_shadow_interval_seconds: int | None = None,
     entries_enabled: bool | None = None,
 ) -> FastAPI:
     resolved_database = database or Path(
@@ -98,6 +116,18 @@ def create_app(
     if resolved_exit_interval <= 0:
         raise ValueError("POSITION_EXIT_INTERVAL_SECONDS must be positive")
 
+    resolved_v34_shadow_interval = (
+        v34_shadow_interval_seconds
+        if v34_shadow_interval_seconds is not None
+        else _integer_env(
+            "V34_SHADOW_INTERVAL_SECONDS",
+            30,
+        )
+    )
+
+    if resolved_v34_shadow_interval <= 0:
+        raise ValueError("V34_SHADOW_INTERVAL_SECONDS must be positive")
+
     resolved_entries_enabled = (
         entries_enabled
         if entries_enabled is not None
@@ -120,6 +150,7 @@ def create_app(
         ),
     )
     delta_client = DeltaPublicClient()
+    delta_history_client = DeltaHistoryClient()
     signal_client = BinanceFuturesPublicClient()
 
     fast_entry_proposal_config = PaperProposalConfig(
@@ -139,6 +170,11 @@ def create_app(
     )
 
     state = DashboardState(resolved_entries_enabled)
+    v34_shadow_observer = V34ShadowObserver(
+        history_client=delta_history_client,
+        delta_client=delta_client,
+    )
+    v34_shadow_state = V34ShadowState()
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -170,10 +206,18 @@ def create_app(
                 interval_seconds=resolved_exit_interval,
             )
         )
+        v34_shadow_task = asyncio.create_task(
+            _poll_v34_shadow(
+                observer=v34_shadow_observer,
+                state=v34_shadow_state,
+                interval_seconds=resolved_v34_shadow_interval,
+            )
+        )
         tasks = (
             polling_task,
             fast_entry_task,
             fast_exit_task,
+            v34_shadow_task,
         )
 
         try:
@@ -221,6 +265,10 @@ def create_app(
             "signals": [_signal_payload(signal) for signal in signals],
         }
 
+    @application.get("/api/v34-shadow")
+    def v34_shadow_data() -> dict[str, object]:
+        return v34_shadow_state.payload
+
     @application.get("/health")
     def health() -> dict[str, object]:
         return {
@@ -233,6 +281,12 @@ def create_app(
             "observer_entries_enabled": observer.entries_enabled,
             "fast_entry_interval_seconds": resolved_entry_interval,
             "position_exit_interval_seconds": resolved_exit_interval,
+            "v34_shadow_status": v34_shadow_state.payload.get(
+                "status",
+                "unknown",
+            ),
+            "v34_shadow_entry_authority": False,
+            "v34_shadow_interval_seconds": resolved_v34_shadow_interval,
         }
 
     return application
@@ -263,6 +317,54 @@ async def _poll_dashboard(
                 "updated_at": datetime.now(UTC).isoformat(),
                 "message": str(error),
             }
+
+        await asyncio.sleep(interval_seconds)
+
+
+async def _poll_v34_shadow(
+    *,
+    observer: V34ShadowObserver,
+    state: V34ShadowState,
+    interval_seconds: int,
+) -> None:
+    while True:
+        try:
+            cycle = await asyncio.to_thread(observer.run_cycle)
+
+            if cycle.evaluated or cycle.warnings:
+                payload = v34_shadow_cycle_payload(cycle)
+                payload["updated_at"] = datetime.now(UTC).isoformat()
+                state.payload = payload
+
+            for signal in cycle.signals:
+                _LOGGER.info(
+                    "V34_SHADOW underlying=%s candle_close_ms=%s "
+                    "decision=%s call_score=%.2f put_score=%.2f "
+                    "confidence=%.2f reasons=%s",
+                    signal.underlying,
+                    signal.candle_close_ms,
+                    signal.decision.value,
+                    signal.call_score,
+                    signal.put_score,
+                    signal.confidence,
+                    ",".join(signal.reasons),
+                )
+
+            for warning in cycle.warnings:
+                _LOGGER.warning("V34_SHADOW_WARNING %s", warning)
+
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            state.payload = {
+                "status": "error",
+                "entry_authority": False,
+                "updated_at": datetime.now(UTC).isoformat(),
+                "message": str(error),
+                "signals": [],
+                "warnings": [str(error)],
+            }
+            _LOGGER.exception("V34_SHADOW_CYCLE_FAILED")
 
         await asyncio.sleep(interval_seconds)
 
