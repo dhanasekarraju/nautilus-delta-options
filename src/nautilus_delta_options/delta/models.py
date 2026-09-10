@@ -93,7 +93,11 @@ class DeltaOptionTicker:
             best_ask=_optional_decimal(quotes.get("best_ask"), "quotes.best_ask"),
             bid_size=_optional_decimal(quotes.get("bid_size"), "quotes.bid_size"),
             ask_size=_optional_decimal(quotes.get("ask_size"), "quotes.ask_size"),
-            mark_iv=_optional_decimal(quotes.get("mark_iv"), "quotes.mark_iv"),
+            mark_iv=(
+                _optional_decimal(raw.get("mark_vol"), "mark_vol")
+                if raw.get("mark_vol") is not None
+                else _optional_decimal(quotes.get("mark_iv"), "quotes.mark_iv")
+            ),
             bid_iv=_optional_decimal(quotes.get("bid_iv"), "quotes.bid_iv"),
             ask_iv=_optional_decimal(quotes.get("ask_iv"), "quotes.ask_iv"),
             delta=_optional_decimal(greeks.get("delta"), "greeks.delta"),
