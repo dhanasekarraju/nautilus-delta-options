@@ -11,6 +11,11 @@ from nautilus_delta_options.delta.public_client import (
     DeltaOptionChainSnapshot,
     DeltaUnderlying,
 )
+from nautilus_delta_options.selection.v34_quality import (
+    V34ContractQuality,
+    V34QualityConfig,
+    rank_v34_contract_quality,
+)
 from nautilus_delta_options.signals.v34 import (
     V34ChainState,
     V34Config,
@@ -37,11 +42,21 @@ class V34ShadowOptionMarketData(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class V34ShadowQualitySelection:
+    underlying: DeltaUnderlying
+    call_candidate_count: int
+    put_candidate_count: int
+    best_call: V34ContractQuality | None
+    best_put: V34ContractQuality | None
+
+
+@dataclass(frozen=True, slots=True)
 class V34ShadowCycle:
     candle_close_ms: int | None
     evaluated: bool
     signals: tuple[V34ShadowSignal, ...]
     warnings: tuple[str, ...]
+    quality: tuple[V34ShadowQualitySelection, ...] = ()
 
 
 class V34ShadowObserver:
@@ -59,6 +74,7 @@ class V34ShadowObserver:
         delta_client: V34ShadowOptionMarketData,
         underlyings: Sequence[DeltaUnderlying] = ("BTC", "ETH"),
         config: V34Config | None = None,
+        quality_config: V34QualityConfig | None = None,
         candle_count: int = 240,
         clock_ns: Callable[[], int] = time.time_ns,
         utc_date: Callable[[], date] | None = None,
@@ -74,6 +90,7 @@ class V34ShadowObserver:
         self._delta_client = delta_client
         self._underlyings = tuple(underlyings)
         self._config = config or V34Config()
+        self._quality_config = quality_config or V34QualityConfig()
         self._candle_count = candle_count
         self._clock_ns = clock_ns
         self._utc_date = utc_date or (lambda: datetime.now(UTC).date())
@@ -143,18 +160,42 @@ class V34ShadowObserver:
 
             as_of = self._utc_date()
             candidate_signals: list[V34ShadowSignal] = []
+            quality_selections: list[V34ShadowQualitySelection] = []
 
             for underlying in self._underlyings:
+                chain = chains[underlying]
                 captured_ns = self._clock_ns()
                 signal = evaluate_v34_shadow_signal(
                     candle_by_underlying[underlying],
-                    chains[underlying],
+                    chain,
                     as_of=as_of,
                     captured_ns=captured_ns,
                     previous_chain=self._previous_chains.get(underlying),
                     config=self._config,
                 )
                 candidate_signals.append(signal)
+
+                call_ranked = rank_v34_contract_quality(
+                    chain,
+                    contract_type="call_options",
+                    as_of=as_of,
+                    config=self._quality_config,
+                )
+                put_ranked = rank_v34_contract_quality(
+                    chain,
+                    contract_type="put_options",
+                    as_of=as_of,
+                    config=self._quality_config,
+                )
+                quality_selections.append(
+                    V34ShadowQualitySelection(
+                        underlying=underlying,
+                        call_candidate_count=len(call_ranked),
+                        put_candidate_count=len(put_ranked),
+                        best_call=call_ranked[0] if call_ranked else None,
+                        best_put=put_ranked[0] if put_ranked else None,
+                    )
+                )
         except Exception as error:
             # All-or-nothing snapshot ownership: if either side fails, do not
             # advance the V3.4 previous-chain baseline or candle boundary.
@@ -166,6 +207,7 @@ class V34ShadowObserver:
             )
 
         signals = tuple(candidate_signals)
+        quality = tuple(quality_selections)
 
         # Commit rolling state only after both BTC and ETH were evaluated.
         for signal in signals:
@@ -177,10 +219,12 @@ class V34ShadowObserver:
             evaluated=True,
             signals=signals,
             warnings=(),
+            quality=quality,
         )
 
 
 def v34_shadow_cycle_payload(cycle: V34ShadowCycle) -> dict[str, object]:
+    quality_by_underlying = {row.underlying: row for row in cycle.quality}
     return {
         "status": (
             "ready"
@@ -189,12 +233,21 @@ def v34_shadow_cycle_payload(cycle: V34ShadowCycle) -> dict[str, object]:
         ),
         "entry_authority": False,
         "candle_close_ms": cycle.candle_close_ms,
-        "signals": [v34_shadow_signal_payload(signal) for signal in cycle.signals],
+        "signals": [
+            v34_shadow_signal_payload(
+                signal,
+                quality_by_underlying.get(signal.underlying),
+            )
+            for signal in cycle.signals
+        ],
         "warnings": list(cycle.warnings),
     }
 
 
-def v34_shadow_signal_payload(signal: V34ShadowSignal) -> dict[str, object]:
+def v34_shadow_signal_payload(
+    signal: V34ShadowSignal,
+    quality: V34ShadowQualitySelection | None = None,
+) -> dict[str, object]:
     u = signal.underlying_state
     flow = signal.flow_state
 
@@ -204,7 +257,9 @@ def v34_shadow_signal_payload(signal: V34ShadowSignal) -> dict[str, object]:
         "decision": signal.decision.value.upper(),
         "call_score": signal.call_score,
         "put_score": signal.put_score,
+        # Kept for API compatibility; score_edge is the clearer name.
         "confidence": signal.confidence,
+        "score_edge": signal.confidence,
         "reasons": list(signal.reasons),
         "underlying_state": {
             "close": u.close,
@@ -237,4 +292,53 @@ def v34_shadow_signal_payload(signal: V34ShadowSignal) -> dict[str, object]:
             }
         ),
         "core_contracts": len(signal.chain_state.contracts),
+        "contract_quality": _quality_selection_payload(quality),
+    }
+
+
+def _quality_selection_payload(
+    quality: V34ShadowQualitySelection | None,
+) -> dict[str, object] | None:
+    if quality is None:
+        return None
+
+    return {
+        "call_candidate_count": quality.call_candidate_count,
+        "put_candidate_count": quality.put_candidate_count,
+        "best_call": _contract_quality_payload(quality.best_call),
+        "best_put": _contract_quality_payload(quality.best_put),
+    }
+
+
+def _contract_quality_payload(
+    row: V34ContractQuality | None,
+) -> dict[str, object] | None:
+    if row is None:
+        return None
+
+    c = row.components
+    return {
+        "symbol": row.symbol,
+        "score": row.score,
+        "dte": row.dte,
+        "strike": row.strike,
+        "abs_delta": row.abs_delta,
+        "spread_fraction": row.spread_fraction,
+        "mark_iv": row.mark_iv,
+        "gamma_convexity_1pct": row.gamma_convexity_1pct,
+        "theta_burden": row.theta_burden,
+        "convexity_efficiency": row.convexity_efficiency,
+        "vega_efficiency": row.vega_efficiency,
+        "open_interest": row.open_interest,
+        "volume": row.volume,
+        "quote_depth": row.quote_depth,
+        "components": {
+            "delta_fit": c.delta_fit,
+            "spread": c.spread,
+            "convexity_efficiency": c.convexity_efficiency,
+            "theta": c.theta,
+            "vega": c.vega,
+            "iv": c.iv,
+            "liquidity": c.liquidity,
+        },
     }

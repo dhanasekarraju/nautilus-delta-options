@@ -200,3 +200,127 @@ def test_payload_explicitly_reports_no_entry_authority() -> None:
     )
 
     assert payload["entry_authority"] is False
+
+
+def test_observer_attaches_best_quality_call_and_put(monkeypatch) -> None:
+    history = _History(
+        _candles("BTC", 1_800_000_000),
+        _candles("ETH", 1_800_000_000),
+    )
+    delta = _Delta()
+
+    from nautilus_delta_options.paper import v34_shadow as module
+    from nautilus_delta_options.signals.v34 import (
+        V34ChainState,
+        V34Decision,
+        V34ShadowSignal,
+        V34UnderlyingState,
+    )
+
+    def fake_evaluate(candles, chain, *, as_of, captured_ns, previous_chain, config):
+        return V34ShadowSignal(
+            underlying=candles.underlying,
+            candle_close_ms=candles.candle_close_ms,
+            decision=V34Decision.WAIT,
+            call_score=0,
+            put_score=0,
+            confidence=0,
+            underlying_state=V34UnderlyingState(
+                close=100,
+                rsi=50,
+                ema20=100,
+                ema50=100,
+                adx=10,
+                atr_pct=0.01,
+                ema20_slope_atr=0,
+                return_5m=0,
+                return_15m=0,
+                return_30m=0,
+                extension_atr=0,
+                call_score=0,
+                put_score=0,
+            ),
+            flow_state=None,
+            chain_state=V34ChainState(
+                underlying=candles.underlying,
+                captured_ns=captured_ns,
+                contracts=(),
+            ),
+            reasons=("test",),
+        )
+
+    monkeypatch.setattr(module, "evaluate_v34_shadow_signal", fake_evaluate)
+
+    observer = V34ShadowObserver(
+        history_client=history,
+        delta_client=delta,
+        clock_ns=lambda: 1,
+        utc_date=lambda: date(2026, 9, 10),
+    )
+
+    cycle = observer.run_cycle()
+    payload = v34_shadow_cycle_payload(cycle)
+
+    assert cycle.evaluated is True
+    assert len(cycle.quality) == 2
+    assert payload["entry_authority"] is False
+
+    for signal in payload["signals"]:
+        quality = signal["contract_quality"]
+        assert quality["call_candidate_count"] == 2
+        assert quality["put_candidate_count"] == 2
+        assert quality["best_call"]["abs_delta"] == 0.5
+        assert quality["best_put"]["abs_delta"] == 0.5
+        assert quality["best_call"]["components"]
+        assert quality["best_put"]["components"]
+
+
+def test_quality_payload_uses_score_edge_name_without_removing_compatibility(monkeypatch) -> None:
+    history = _History(
+        _candles("BTC", 1_800_000_000),
+        _candles("ETH", 1_800_000_000),
+    )
+    delta = _Delta()
+
+    from nautilus_delta_options.paper import v34_shadow as module
+    from nautilus_delta_options.signals.v34 import (
+        V34ChainState,
+        V34Decision,
+        V34ShadowSignal,
+        V34UnderlyingState,
+    )
+
+    def fake_evaluate(candles, chain, *, as_of, captured_ns, previous_chain, config):
+        return V34ShadowSignal(
+            underlying=candles.underlying,
+            candle_close_ms=candles.candle_close_ms,
+            decision=V34Decision.WAIT,
+            call_score=70,
+            put_score=10,
+            confidence=60,
+            underlying_state=V34UnderlyingState(
+                close=100, rsi=50, ema20=100, ema50=100, adx=10,
+                atr_pct=0.01, ema20_slope_atr=0, return_5m=0,
+                return_15m=0, return_30m=0, extension_atr=0,
+                call_score=70, put_score=10,
+            ),
+            flow_state=None,
+            chain_state=V34ChainState(
+                underlying=candles.underlying,
+                captured_ns=captured_ns,
+                contracts=(),
+            ),
+            reasons=("test",),
+        )
+
+    monkeypatch.setattr(module, "evaluate_v34_shadow_signal", fake_evaluate)
+    cycle = V34ShadowObserver(
+        history_client=history,
+        delta_client=delta,
+        clock_ns=lambda: 1,
+        utc_date=lambda: date(2026, 9, 10),
+    ).run_cycle()
+
+    signal = v34_shadow_cycle_payload(cycle)["signals"][0]
+    assert signal["score_edge"] == 60
+    assert signal["confidence"] == 60
