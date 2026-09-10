@@ -207,7 +207,7 @@ def test_chain_flow_requires_multiple_bullish_call_inputs() -> None:
 
     flow = evaluate_v34_chain_flow(previous, current)
 
-    assert flow.call_confirmations >= 4
+    assert flow.call_confirmations == 3
     assert flow.call_score > flow.put_score
     assert flow.iv_edge > 0
     assert flow.oi_edge > 0
@@ -683,3 +683,69 @@ def test_flow_depth_uses_change_not_static_imbalance() -> None:
 
     assert flow.depth_edge == pytest.approx(0)
     assert flow.call_confirmations == 0
+
+
+def test_supporting_oi_and_volume_do_not_count_as_primary_confirmations() -> None:
+    previous = V34ChainState(
+        underlying="BTC",
+        captured_ns=1,
+        contracts=(
+            V34ContractState(
+                symbol="C1",
+                contract_type="call_options",
+                iv=0.40,
+                mark_price=100,
+                open_interest=100,
+                volume=100,
+                bid_size=100,
+                ask_size=100,
+            ),
+            V34ContractState(
+                symbol="P1",
+                contract_type="put_options",
+                iv=0.40,
+                mark_price=100,
+                open_interest=100,
+                volume=100,
+                bid_size=100,
+                ask_size=100,
+            ),
+        ),
+    )
+    current = V34ChainState(
+        underlying="BTC",
+        captured_ns=301_000_000_001,
+        contracts=(
+            V34ContractState(
+                symbol="C1",
+                contract_type="call_options",
+                iv=0.40,
+                mark_price=106,
+                open_interest=140,
+                volume=180,
+                bid_size=100,
+                ask_size=100,
+            ),
+            V34ContractState(
+                symbol="P1",
+                contract_type="put_options",
+                iv=0.40,
+                mark_price=100,
+                open_interest=100,
+                volume=110,
+                bid_size=100,
+                ask_size=100,
+            ),
+        ),
+    )
+
+    flow = evaluate_v34_chain_flow(previous, current)
+
+    # Premium is the only primary directional confirmation here.
+    # OI and volume can add score, but may not promote this to two
+    # independent confirmations.
+    assert flow.premium_edge > 0
+    assert flow.oi_edge > 0
+    assert flow.volume_edge > 0
+    assert flow.call_score > 10
+    assert flow.call_confirmations == 1

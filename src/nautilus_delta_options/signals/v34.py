@@ -551,14 +551,15 @@ def _flow_score(
     # from writing.
     if oi_edge > 0.01 and (premium_confirm or iv_confirm):
         score += 4.0
-        confirms += 1
 
     # Volume is also supporting evidence only. It is an aggregate ticker
     # quantity, not signed aggressor flow.
     if volume_edge > 0.10 and (premium_confirm or depth_confirm):
         score += 3.0
-        confirms += 1
 
+    # `confirms` deliberately counts only primary directional evidence:
+    # premium, IV and depth CHANGE. OI/aggregate volume may strengthen a
+    # score but can never satisfy the minimum-confirmation gate themselves.
     return score, confirms
 
 
