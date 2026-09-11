@@ -1,0 +1,427 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport"
+        content="width=device-width, initial-scale=1">
+  <title>V3.4 Paper Live</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family:
+        Inter, ui-sans-serif, system-ui, sans-serif;
+    }
+
+    body {
+      margin: 0;
+      background: #0b0f14;
+      color: #e8eef7;
+    }
+
+    main {
+      max-width: 1320px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+
+    .banner {
+      border: 1px solid #465466;
+      border-radius: 14px;
+      padding: 18px 20px;
+      background: #111821;
+      margin-bottom: 18px;
+    }
+
+    .paper {
+      font-weight: 800;
+      font-size: 13px;
+      letter-spacing: .09em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      margin: 5px 0;
+      font-size: 30px;
+    }
+
+    .muted {
+      color: #9aabba;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns:
+        repeat(auto-fit, minmax(190px, 1fr));
+      gap: 12px;
+      margin: 14px 0;
+    }
+
+    .card {
+      border: 1px solid #293544;
+      border-radius: 12px;
+      padding: 15px;
+      background: #10161e;
+    }
+
+    .label {
+      font-size: 12px;
+      color: #8ea0b2;
+      text-transform: uppercase;
+      letter-spacing: .05em;
+    }
+
+    .value {
+      font-size: 24px;
+      font-weight: 750;
+      margin-top: 5px;
+    }
+
+    section {
+      margin-top: 24px;
+    }
+
+    section h2 {
+      margin-bottom: 10px;
+      font-size: 19px;
+    }
+
+    .signals {
+      display: grid;
+      grid-template-columns:
+        repeat(auto-fit, minmax(330px, 1fr));
+      gap: 12px;
+    }
+
+    .signal {
+      border: 1px solid #293544;
+      border-radius: 12px;
+      padding: 16px;
+      background: #10161e;
+    }
+
+    .signal-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .decision {
+      font-size: 20px;
+      font-weight: 800;
+    }
+
+    .row {
+      display: flex;
+      justify-content: space-between;
+      gap: 18px;
+      padding: 5px 0;
+      border-bottom: 1px solid #1e2935;
+    }
+
+    .row:last-child {
+      border-bottom: 0;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+
+    th, td {
+      border-bottom: 1px solid #253140;
+      padding: 9px 8px;
+      text-align: left;
+      white-space: nowrap;
+    }
+
+    th {
+      color: #91a4b7;
+      font-weight: 600;
+    }
+
+    .table-wrap {
+      overflow-x: auto;
+      border: 1px solid #293544;
+      border-radius: 12px;
+      background: #10161e;
+    }
+
+    .error {
+      white-space: pre-wrap;
+      border: 1px solid #633;
+      border-radius: 12px;
+      padding: 12px;
+      margin-top: 12px;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <div class="banner">
+    <div class="paper" id="authority">
+      PAPER ONLY · REAL ORDERS DISABLED · ENTRIES CHECKING…
+    </div>
+    <h1>Delta Options · V3.4 Paper Live</h1>
+    <div class="muted" id="updated">
+      Loading…
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <div class="label">20-trade progress</div>
+      <div class="value" id="progress">—</div>
+    </div>
+
+    <div class="card">
+      <div class="label">Available cash</div>
+      <div class="value" id="cash">—</div>
+    </div>
+
+    <div class="card">
+      <div class="label">Realized P&amp;L</div>
+      <div class="value" id="pnl">—</div>
+    </div>
+
+    <div class="card">
+      <div class="label">Win rate</div>
+      <div class="value" id="wr">—</div>
+    </div>
+
+    <div class="card">
+      <div class="label">Profit factor</div>
+      <div class="value" id="pf">—</div>
+    </div>
+
+    <div class="card">
+      <div class="label">Open positions</div>
+      <div class="value" id="open-count">—</div>
+    </div>
+  </div>
+
+  <div id="error"></div>
+
+  <section>
+    <h2>Latest real Delta V3.4 signals</h2>
+    <div class="signals" id="signals">
+      <div class="muted">
+        Waiting for first V3.4 evaluation.
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Open paper positions</h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Asset</th>
+            <th>Side</th>
+            <th>Contract</th>
+            <th>Contracts</th>
+            <th>Entry</th>
+            <th>SL</th>
+            <th>TP</th>
+            <th>RR</th>
+          </tr>
+        </thead>
+        <tbody id="open"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>Closed V3.4 paper trades</h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Asset</th>
+            <th>Side</th>
+            <th>Contract</th>
+            <th>Entry</th>
+            <th>Exit</th>
+            <th>Net P&amp;L</th>
+            <th>Reason</th>
+          </tr>
+        </thead>
+        <tbody id="closed"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<script>
+const esc = (v) => String(v ?? "")
+  .replaceAll("&", "&amp;")
+  .replaceAll("<", "&lt;")
+  .replaceAll(">", "&gt;")
+  .replaceAll('"', "&quot;")
+  .replaceAll("'", "&#039;");
+
+const num = (v, d = 2) => {
+  if (v === null || v === undefined || v === "") return "—";
+  const n = Number(v);
+  return Number.isFinite(n) ? n.toFixed(d) : String(v);
+};
+
+function renderSignal(s) {
+  const u = s.underlying_state || {};
+  const f = s.flow_state || {};
+  const q = s.contract_quality || {};
+  const side = s.decision === "CALL"
+    ? q.best_call
+    : s.decision === "PUT"
+      ? q.best_put
+      : null;
+  const pe = s.paper_entry || {};
+
+  return `
+    <article class="signal">
+      <div class="signal-head">
+        <strong>${esc(s.underlying)}</strong>
+        <span class="decision">${esc(s.decision)}</span>
+      </div>
+      <div class="row">
+        <span>CALL / PUT</span>
+        <strong>${num(s.call_score, 0)} / ${num(s.put_score, 0)}</strong>
+      </div>
+      <div class="row">
+        <span>ADX</span>
+        <strong>${num(u.adx)}</strong>
+      </div>
+      <div class="row">
+        <span>15m / 30m</span>
+        <strong>${num(u.return_15m, 5)} / ${num(u.return_30m, 5)}</strong>
+      </div>
+      <div class="row">
+        <span>Flow confirms C / P</span>
+        <strong>${f.call_confirmations ?? "—"} / ${f.put_confirmations ?? "—"}</strong>
+      </div>
+      <div class="row">
+        <span>Selected contract</span>
+        <strong>${side ? esc(side.symbol) : "—"}</strong>
+      </div>
+      <div class="row">
+        <span>Quality</span>
+        <strong>${side ? num(side.score) : "—"}</strong>
+      </div>
+      <div class="row">
+        <span>Paper entry</span>
+        <strong>${esc(pe.status || "—")}</strong>
+      </div>
+      <div class="muted" style="margin-top:8px">
+        ${esc((s.reasons || []).join(", "))}
+      </div>
+    </article>
+  `;
+}
+
+function renderRows(rows, open) {
+  if (!rows.length) {
+    return `<tr><td colspan="9" class="muted">None</td></tr>`;
+  }
+
+  if (open) {
+    return rows.map(p => `
+      <tr>
+        <td>${esc(p.trade_id)}</td>
+        <td>${esc(p.underlying)}</td>
+        <td>${esc(p.contract_type)}</td>
+        <td>${esc(p.symbol)}</td>
+        <td>${esc(p.contracts)}</td>
+        <td>${num(p.entry_price)}</td>
+        <td>${num(p.stop_price)}</td>
+        <td>${num(p.target_price)}</td>
+        <td>${num(p.reward_risk)}</td>
+      </tr>
+    `).join("");
+  }
+
+  return rows.map(t => `
+    <tr>
+      <td>${esc(t.trade_id)}</td>
+      <td>${esc(t.underlying)}</td>
+      <td>${esc(t.contract_type)}</td>
+      <td>${esc(t.symbol)}</td>
+      <td>${num(t.entry_price)}</td>
+      <td>${num(t.exit_price)}</td>
+      <td>${num(t.net_pnl)}</td>
+      <td>${esc(t.reason)}</td>
+    </tr>
+  `).join("");
+}
+
+async function refresh() {
+  try {
+    const r = await fetch(
+      "./api/dashboard",
+      { cache: "no-store" }
+    );
+
+    const d = await r.json();
+
+    const s = d.sample || {};
+    const w = d.wallet || {};
+    const p = d.performance || {};
+
+    document.getElementById("updated").textContent =
+      `${d.mode || "V3.4"} · updated ${d.updated_at || "waiting"}`;
+
+    document.getElementById("authority").textContent =
+      d.paper_entries_enabled
+        ? "PAPER ONLY · REAL ORDERS DISABLED · PAPER ENTRIES ENABLED"
+        : "PAPER ONLY · REAL ORDERS DISABLED · PAPER ENTRIES DISABLED";
+
+    document.getElementById("progress").textContent =
+      `${s.closed ?? 0} / ${s.target ?? 20}`;
+
+    document.getElementById("cash").textContent =
+      `${num(w.available_cash)} USDT`;
+
+    document.getElementById("pnl").textContent =
+      `${num(p.net_pnl)} USDT`;
+
+    document.getElementById("wr").textContent =
+      p.win_rate === null || p.win_rate === undefined
+        ? "—"
+        : `${num(p.win_rate)}%`;
+
+    document.getElementById("pf").textContent =
+      p.profit_factor ?? "—";
+
+    document.getElementById("open-count").textContent =
+      s.open ?? 0;
+
+    document.getElementById("signals").innerHTML =
+      (d.signals || []).length
+        ? d.signals.map(renderSignal).join("")
+        : `<div class="muted">Waiting for first V3.4 evaluation.</div>`;
+
+    document.getElementById("open").innerHTML =
+      renderRows(d.open_positions || [], true);
+
+    document.getElementById("closed").innerHTML =
+      renderRows(d.closed_trades || [], false);
+
+    document.getElementById("error").innerHTML =
+      d.error
+        ? `<div class="error">${esc(d.error)}</div>`
+        : "";
+
+  } catch (e) {
+    document.getElementById("error").innerHTML =
+      `<div class="error">${esc(e)}</div>`;
+  }
+}
+
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>
