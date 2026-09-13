@@ -58,11 +58,27 @@ class DeltaPublicClient:
         self,
         underlying: DeltaUnderlying,
     ) -> DeltaOptionProductsSnapshot:
-        payload = self._fetch_options_payload(
-            path="/v2/products",
-            underlying=underlying,
-        )
-        return parse_option_products_payload(payload, underlying=underlying)
+        products: list[DeltaOptionProduct] = []
+        rejected: list[str] = []
+        cursor: str | None = None
+        seen: set[str] = set()
+        for _ in range(100):
+            payload = self._fetch_options_payload(
+                path="/v2/products", underlying=underlying, after=cursor,
+            )
+            page = parse_option_products_payload(payload, underlying=underlying)
+            products.extend(page.products)
+            rejected.extend(page.rejected_records)
+            response = cast(Mapping[str, object], payload)
+            meta = response.get("meta")
+            after = meta.get("after") if isinstance(meta, Mapping) else None
+            if after is None:
+                return DeltaOptionProductsSnapshot(underlying, tuple(products), tuple(rejected))
+            if not isinstance(after, str) or not after or after in seen:
+                raise ValueError("Invalid or repeated product pagination cursor")
+            seen.add(after)
+            cursor = after
+        raise ValueError("Product pagination exceeded safety limit")
 
     def fetch_option_tickers(
         self,
@@ -118,6 +134,7 @@ class DeltaPublicClient:
         *,
         path: str,
         underlying: DeltaUnderlying,
+        after: str | None = None,
     ) -> object:
         params = urllib.parse.urlencode(
             {
@@ -125,6 +142,8 @@ class DeltaPublicClient:
                 "underlying_asset_symbols": underlying,
             },
         )
+        if after is not None:
+            params += "&" + urllib.parse.urlencode({"after": after})
         url = f"{self._base_url}{path}?{params}"
 
         request = urllib.request.Request(

@@ -165,6 +165,9 @@ class V34ShadowObserver:
             for underlying in self._underlyings:
                 chain = chains[underlying]
                 captured_ns = self._clock_ns()
+                from nautilus_delta_options.paper.quote_safety import fresh_chain
+
+                chain = fresh_chain(chain, captured_ns)
                 signal = evaluate_v34_shadow_signal(
                     candle_by_underlying[underlying],
                     chain,
@@ -262,7 +265,7 @@ def v34_shadow_signal_payload(
         "put_score": signal.put_score,
         # Kept for API compatibility; score_edge is the clearer name.
         "confidence": signal.confidence,
-        "score_edge": signal.confidence,
+        "score_edge": abs(signal.call_score - signal.put_score),
         "reasons": list(signal.reasons),
         "underlying_state": {
             "close": u.close,

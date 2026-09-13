@@ -36,6 +36,7 @@ class SQLitePaperLedgerStore:
     """Atomically persists one complete paper-ledger snapshot in SQLite."""
 
     def __init__(self, path: str | Path) -> None:
+        self._revision: int | None = None
         self._path = Path(path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
@@ -44,7 +45,30 @@ class SQLitePaperLedgerStore:
     def path(self) -> Path:
         return self._path
 
-    def save(self, ledger: PaperLedger) -> None:
+    @property
+    def revision(self) -> int | None:
+        return self._revision
+
+    def _check_revision(
+        self,
+        connection: sqlite3.Connection,
+        expected: int | None,
+    ) -> None:
+        row = connection.execute(
+            "SELECT updated_ns FROM paper_ledger_state WHERE id = 1"
+        ).fetchone()
+        actual = row[0] if row else None
+        if actual != expected:
+            raise PaperLedgerPersistenceError(
+                "Ledger revision changed: another writer is active; reload before retrying"
+            )
+
+    def save(
+        self,
+        ledger: PaperLedger,
+        *,
+        expected_revision: int | None = None,
+    ) -> None:
         payload = json.dumps(
             _ledger_to_payload(ledger),
             separators=(",", ":"),
@@ -53,6 +77,11 @@ class SQLitePaperLedgerStore:
 
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            self._check_revision(
+                connection,
+                self._revision if expected_revision is None else expected_revision,
+            )
+            revision = max(time.time_ns(), (self._revision or 0) + 1)
             connection.execute(
                 """
                 INSERT INTO paper_ledger_state (
@@ -67,8 +96,10 @@ class SQLitePaperLedgerStore:
                     payload = excluded.payload,
                     updated_ns = excluded.updated_ns
                 """,
-                (_SCHEMA_VERSION, payload, time.time_ns()),
+                (_SCHEMA_VERSION, payload, revision),
             )
+
+        self._revision = revision
 
     def has_consumed_signal(self, signal_key: str) -> bool:
         _validate_signal_metadata(
@@ -98,6 +129,7 @@ class SQLitePaperLedgerStore:
         underlying: str,
         candle_closed_ns: int,
         trade_id: int,
+        expected_revision: int | None = None,
     ) -> PaperSignalReceipt | None:
         _validate_signal_metadata(
             signal_key=signal_key,
@@ -120,7 +152,7 @@ class SQLitePaperLedgerStore:
             separators=(",", ":"),
             sort_keys=True,
         )
-        consumed_ns = time.time_ns()
+        consumed_ns = max(time.time_ns(), (self._revision or 0) + 1)
         receipt = PaperSignalReceipt(
             signal_key=signal_key,
             underlying=underlying,
@@ -143,6 +175,10 @@ class SQLitePaperLedgerStore:
             if existing is not None:
                 return None
 
+            self._check_revision(
+                connection,
+                self._revision if expected_revision is None else expected_revision,
+            )
             try:
                 connection.execute(
                     """
@@ -184,13 +220,14 @@ class SQLitePaperLedgerStore:
                     "Signal receipt conflicts with persisted state"
                 ) from error
 
+        self._revision = consumed_ns
         return receipt
 
     def load(self) -> PaperLedger | None:
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT schema_version, payload
+                SELECT schema_version, payload, updated_ns
                 FROM paper_ledger_state
                 WHERE id = 1
                 """
@@ -199,7 +236,8 @@ class SQLitePaperLedgerStore:
         if row is None:
             return None
 
-        schema_version, payload_text = row
+        schema_version, payload_text, revision = row
+        self._revision = revision
 
         if schema_version != _SCHEMA_VERSION:
             raise PaperLedgerPersistenceError(f"Unsupported schema version: {schema_version}")
@@ -211,7 +249,13 @@ class SQLitePaperLedgerStore:
         except (json.JSONDecodeError, TypeError) as error:
             raise PaperLedgerPersistenceError("Persisted ledger payload is invalid JSON") from error
 
-        return _ledger_from_payload(decoded)
+        ledger = _ledger_from_payload(decoded)
+        expected_cash = ledger.initial_cash + ledger.realized_pnl - sum(
+            (p.entry_debit for p in ledger.open_positions), Decimal("0"),
+        )
+        if ledger.cash != expected_cash:
+            raise PaperLedgerPersistenceError("Persisted cash does not reconcile with paper trades")
+        return ledger
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(str(self._path), timeout=5.0)
@@ -309,6 +353,14 @@ def _position_to_payload(position: PaperPosition) -> dict[str, object]:
         "planned_reward": str(position.planned_reward),
         "taker_fee": str(position.taker_fee),
         "premium_cap_rate": str(position.premium_cap_rate),
+        "last_quote_ns": position.last_quote_ns,
+        "last_bid": str(position.last_bid) if position.last_bid is not None else None,
+        "last_exit_fee": str(position.last_exit_fee)
+        if position.last_exit_fee is not None
+        else None,
+        "settlement_ns": position.settlement_ns,
+        "strike_price": str(position.strike_price),
+        "unresolved_reason": position.unresolved_reason,
     }
 
 
@@ -403,6 +455,14 @@ def _position_from_payload(value: object) -> PaperPosition:
             "taker_fee",
             default=Decimal("0.0001"),
         ),
+        last_quote_ns=_require_int(payload, "last_quote_ns") if "last_quote_ns" in payload else 0,
+        last_bid=_require_decimal(payload, "last_bid") if payload.get("last_bid") else None,
+        last_exit_fee=(
+            _require_decimal(payload, "last_exit_fee") if payload.get("last_exit_fee") else None
+        ),
+        settlement_ns=_require_int(payload, "settlement_ns") if "settlement_ns" in payload else 0,
+        strike_price=_require_optional_decimal(payload, "strike_price", default=Decimal("0")),
+        unresolved_reason=cast(str | None, payload.get("unresolved_reason")),
         premium_cap_rate=_require_optional_decimal(
             payload,
             "premium_cap_rate",

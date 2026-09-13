@@ -175,7 +175,7 @@ def test_duplicate_boundary_does_not_refetch_chain(monkeypatch) -> None:
     observer = V34ShadowObserver(
         history_client=history,
         delta_client=delta,
-        clock_ns=lambda: 1,
+        clock_ns=lambda: 1_800_000_000_000_000_001,
         utc_date=lambda: date(2026, 9, 10),
     )
 
@@ -254,7 +254,7 @@ def test_observer_attaches_best_quality_call_and_put(monkeypatch) -> None:
     observer = V34ShadowObserver(
         history_client=history,
         delta_client=delta,
-        clock_ns=lambda: 1,
+        clock_ns=lambda: 1_800_000_000_000_000_001,
         utc_date=lambda: date(2026, 9, 10),
     )
 
@@ -317,7 +317,7 @@ def test_quality_payload_uses_score_edge_name_without_removing_compatibility(mon
     cycle = V34ShadowObserver(
         history_client=history,
         delta_client=delta,
-        clock_ns=lambda: 1,
+        clock_ns=lambda: 1_800_000_000_000_000_001,
         utc_date=lambda: date(2026, 9, 10),
     ).run_cycle()
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -27,6 +28,8 @@ def run_fast_exit_cycle(
     *,
     client: DeltaFastExitMarketData,
     session: PaperLedgerSession,
+    clock_ns: Callable[[], int] = time.time_ns,
+    apply_time_policy: bool = False,
 ) -> PaperFastExitCycle:
     ledger = session.snapshot()
     positions = ledger.open_positions
@@ -70,6 +73,7 @@ def run_fast_exit_cycle(
         position_ticker = tickers_by_symbol.get(position.symbol)
 
         if position_ticker is None:
+            session.note_unresolved(position.trade_id, "fast exit ticker missing")
             warnings.append(
                 f"{position.symbol}: fast exit ticker missing"
             )
@@ -79,8 +83,12 @@ def run_fast_exit_cycle(
             closed = session.process_exit_ticker(
                 position.trade_id,
                 position_ticker,
+                observed_ns=clock_ns(),
+                apply_time_policy=apply_time_policy,
             )
         except ValueError as error:
+            if any(p.trade_id == position.trade_id for p in session.snapshot().open_positions):
+                session.note_unresolved(position.trade_id, str(error))
             warnings.append(
                 f"{position.symbol}: fast exit deferred: {error}"
             )

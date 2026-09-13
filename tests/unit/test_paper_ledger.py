@@ -1173,6 +1173,7 @@ def test_ticker_only_target_matches_full_record_exit() -> None:
     ticker_closed = ticker_ledger.process_exit_ticker(
         ticker_position.trade_id,
         exit_record.ticker,
+        observed_ns=exit_record.quote.ts_init,
     )
 
     assert ticker_closed == record_closed
@@ -1199,6 +1200,7 @@ def test_ticker_only_stop_uses_current_executable_bid() -> None:
             spot="79000",
             timestamp_us=TIMESTAMP_US + 1,
         ),
+        observed_ns=(TIMESTAMP_US + 1) * 1000 + 1,
     )
 
     assert closed is not None
@@ -1229,6 +1231,7 @@ def test_ticker_only_exit_rejects_stale_ticker() -> None:
                 ask="890",
                 timestamp_us=TIMESTAMP_US - 1,
             ),
+            observed_ns=(TIMESTAMP_US + 1) * 1000 + 1,
         )
 
 
@@ -1259,6 +1262,7 @@ def test_ticker_only_exit_rejects_mismatched_product() -> None:
         ledger.process_exit_ticker(
             position.trade_id,
             mismatched,
+            observed_ns=(TIMESTAMP_US + 1) * 1000 + 1,
         )
 
 
@@ -1289,6 +1293,7 @@ def test_ticker_only_exit_rejects_insufficient_bid_depth() -> None:
         ledger.process_exit_ticker(
             position.trade_id,
             shallow,
+            observed_ns=(TIMESTAMP_US + 1) * 1000 + 1,
         )
 
 
@@ -1320,6 +1325,7 @@ def test_persistent_session_saves_ticker_exit_automatically(
             spot="79000",
             timestamp_us=TIMESTAMP_US + 1,
         ),
+        observed_ns=(TIMESTAMP_US + 1) * 1000 + 1,
     )
 
     restored = store.load()
@@ -1401,6 +1407,7 @@ def test_fast_exit_cycle_skips_market_call_without_positions(
     cycle = run_fast_exit_cycle(
         client=client,
         session=session,
+        clock_ns=lambda: (TIMESTAMP_US + 1) * 1000 + 1,
     )
 
     assert cycle.checked_positions == 0
@@ -1439,6 +1446,7 @@ def test_fast_exit_cycle_closes_stop_at_current_bid(
     cycle = run_fast_exit_cycle(
         client=client,
         session=session,
+        clock_ns=lambda: (TIMESTAMP_US + 1) * 1000 + 1,
     )
 
     assert cycle.checked_positions == 1
@@ -1482,9 +1490,11 @@ def test_fast_exit_cycle_leaves_position_open_inside_exit_band(
     cycle = run_fast_exit_cycle(
         client=client,
         session=session,
+        clock_ns=lambda: (TIMESTAMP_US + 1) * 1000 + 1,
     )
 
     assert cycle.checked_positions == 1
     assert cycle.closed_trades == ()
     assert cycle.warnings == ()
-    assert session.ledger.open_positions == (position,)
+    assert session.ledger.open_positions[0].trade_id == position.trade_id
+    assert session.ledger.open_positions[0].last_bid == Decimal("950")

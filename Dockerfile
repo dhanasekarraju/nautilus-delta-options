@@ -16,11 +16,12 @@ RUN groupadd --system --gid 10001 app \
 
 WORKDIR /app
 
-COPY pyproject.toml ./
+COPY pyproject.toml constraints-py312.txt ./
 COPY src ./src
 
 RUN python -m pip install --upgrade pip \
-    && python -m pip install . \
+    && python -m pip install -c constraints-py312.txt . \
+    && python -m nautilus_delta_options.runtime_check \
     && mkdir -p /data \
     && chown app:app /data
 

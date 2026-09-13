@@ -1,4 +1,5 @@
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from enum import StrEnum
 
@@ -18,6 +19,7 @@ class ExitReason(StrEnum):
     TARGET = "target"
     TIME = "time"
     MANUAL = "manual"
+    SETTLEMENT = "settlement"
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +46,12 @@ class PaperPosition:
     planned_reward: Decimal = Decimal("0")
     taker_fee: Decimal = Decimal("0.0001")
     premium_cap_rate: Decimal = Decimal("0.035")
+    last_quote_ns: int = 0
+    last_bid: Decimal | None = None
+    last_exit_fee: Decimal | None = None
+    settlement_ns: int = 0
+    strike_price: Decimal = Decimal("0")
+    unresolved_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,7 +262,18 @@ class PaperLedger:
             stop_price=stop_exit_bid,
             target_price=target_exit_bid,
             planned_reward_risk=payoff.reward_risk_ratio,
-            opened_ns=record.quote.ts_event,
+            opened_ns=record.quote.ts_init,
+            last_quote_ns=record.quote.ts_event,
+            last_bid=ticker.best_bid,
+            last_exit_fee=calculate_option_trade_fee(
+                spot_price=ticker.spot_price,
+                option_price=ticker.best_bid or Decimal("0"),
+                contracts=contracts,
+                contract_value=ticker.contract_value,
+                schedule=fee_schedule,
+            ).total_fee,
+            settlement_ns=int(record.product.settlement_time.timestamp() * 1_000_000_000),
+            strike_price=ticker.strike_price,
             stop_spot=stop_spot,
             target_spot=target_spot,
             planned_loss=payoff.planned_loss,
@@ -274,60 +293,153 @@ class PaperLedger:
         trade_id: int,
         record: DeltaOptionMarketRecord,
     ) -> PaperClosedTrade | None:
-        position = self._require_position(trade_id)
-
-        if record.ticker.best_bid is None:
+        if record.quote is None:
             return None
-
-        if record.ticker.best_bid <= position.stop_price:
-            return self.close_long(
-                trade_id,
-                record,
-                reason=ExitReason.STOP,
-            )
-
-        if record.ticker.best_bid >= position.target_price:
-            return self.close_long(
-                trade_id,
-                record,
-                reason=ExitReason.TARGET,
-            )
-
-        return None
+        return self.process_exit_ticker(
+            trade_id,
+            record.ticker,
+            observed_ns=record.quote.ts_init,
+        )
 
     def process_exit_ticker(
         self,
         trade_id: int,
         ticker: DeltaOptionTicker,
+        *,
+        observed_ns: int | None = None,
+        apply_time_policy: bool = False,
     ) -> PaperClosedTrade | None:
         position = self._require_position(trade_id)
-        event_ns = self._validate_exit_ticker(
+        observed = time.time_ns() if observed_ns is None else observed_ns
+        event_ns = self._validate_exit_ticker(position, ticker, observed_ns=observed)
+        executable = (
+            ticker.best_bid is not None
+            and ticker.best_bid > 0
+            and ticker.bid_size is not None
+            and ticker.bid_size >= position.contracts
+        )
+        fee = None
+        if executable:
+            assert ticker.best_bid is not None
+            fee = calculate_option_trade_fee(
+                spot_price=ticker.spot_price,
+                option_price=ticker.best_bid,
+                contracts=position.contracts,
+                contract_value=position.contract_value,
+                schedule=self._position_fee_schedule(position),
+            ).total_fee
+        position = replace(
+            position,
+            last_quote_ns=event_ns,
+            last_bid=ticker.best_bid if executable else None,
+            last_exit_fee=fee,
+            unresolved_reason=None if executable else "insufficient executable bid depth",
+        )
+        self._positions[trade_id] = position
+        if not executable or ticker.best_bid is None:
+            raise ValueError("Insufficient available bid depth")
+        reason = (
+            ExitReason.STOP
+            if ticker.best_bid <= position.stop_price
+            else ExitReason.TARGET
+            if ticker.best_bid >= position.target_price
+            else None
+        )
+        if apply_time_policy:
+            from nautilus_delta_options.paper.exit_policy import PaperExitPolicyConfig
+
+            policy = PaperExitPolicyConfig()
+            minute = 60_000_000_000
+            if (
+                observed - position.opened_ns >= policy.max_hold_minutes * minute
+                or (position.settlement_ns > 0 and position.settlement_ns - observed
+                    <= policy.close_before_settlement_minutes * minute)
+            ):
+                reason = ExitReason.TIME
+        if reason is None:
+            return None
+        return self._close_long_with_ticker(
             position,
             ticker,
+            reason=reason,
+            event_ns=observed,
+            fee_schedule=self._position_fee_schedule(position),
         )
 
-        if ticker.best_bid is None:
-            return None
+    def note_unresolved(self, trade_id: int, reason: str) -> None:
+        position = self._require_position(trade_id)
+        self._positions[trade_id] = replace(
+            position,
+            last_bid=None,
+            last_exit_fee=None,
+            unresolved_reason=reason,
+        )
 
-        if ticker.best_bid <= position.stop_price:
-            return self._close_long_with_ticker(
-                position,
-                ticker,
-                reason=ExitReason.STOP,
-                event_ns=event_ns,
-                fee_schedule=self._position_fee_schedule(position),
+    def liquidation_equity(self, observed_ns: int) -> tuple[Decimal, bool]:
+        from nautilus_delta_options.paper.quote_safety import validate_quote_time
+
+        value = self.cash
+        complete = True
+        for position in self.open_positions:
+            try:
+                validate_quote_time(position.last_quote_ns, observed_ns)
+            except ValueError:
+                complete = False
+                continue
+            if position.last_bid is None or position.last_exit_fee is None:
+                complete = False
+                continue
+            value += (
+                position.last_bid * position.contracts * position.contract_value
+                - position.last_exit_fee
             )
+        return value, complete
 
-        if ticker.best_bid >= position.target_price:
-            return self._close_long_with_ticker(
-                position,
-                ticker,
-                reason=ExitReason.TARGET,
-                event_ns=event_ns,
-                fee_schedule=self._position_fee_schedule(position),
-            )
-
-        return None
+    def settle_long(
+        self,
+        trade_id: int,
+        *,
+        settlement_spot: Decimal,
+        settlement_fee: Decimal,
+        observed_ns: int,
+        reference: str,
+    ) -> PaperClosedTrade:
+        """Explicit reconciliation using a verified settlement source; never infer from no bid."""
+        position = self._require_position(trade_id)
+        if not reference.strip():
+            raise ValueError("A verified settlement reference is required")
+        if not position.settlement_ns or observed_ns < position.settlement_ns:
+            raise ValueError("Settlement is not due or legacy settlement metadata is missing")
+        if (
+            not settlement_spot.is_finite()
+            or settlement_spot <= 0
+            or not settlement_fee.is_finite()
+            or settlement_fee < 0
+        ):
+            raise ValueError("Invalid settlement price or fee")
+        if position.strike_price <= 0:
+            raise ValueError("Verified strike is required for settlement")
+        intrinsic = max(
+            Decimal("0"),
+            (settlement_spot - position.strike_price)
+            if position.contract_type == "call_options"
+            else (position.strike_price - settlement_spot),
+        )
+        gross = (intrinsic - position.entry_price) * position.contracts * position.contract_value
+        trade = PaperClosedTrade(
+            position=replace(position, unresolved_reason="settlement reference: " + reference),
+            exit_price=intrinsic,
+            exit_spot=settlement_spot,
+            exit_fee=settlement_fee,
+            gross_pnl=gross,
+            net_pnl=gross - position.entry_fee - settlement_fee,
+            reason=ExitReason.SETTLEMENT,
+            closed_ns=observed_ns,
+        )
+        self._cash += intrinsic * position.contracts * position.contract_value - settlement_fee
+        del self._positions[trade_id]
+        self._closed_trades.append(trade)
+        return trade
 
     def close_long(
         self,
@@ -346,18 +458,17 @@ class PaperLedger:
         event_ns = self._validate_exit_ticker(
             position,
             record.ticker,
+            observed_ns=record.quote.ts_init,
         )
 
         if record.quote.ts_event != event_ns:
-            raise ValueError(
-                "Exit quote timestamp does not match ticker timestamp"
-            )
+            raise ValueError("Exit quote timestamp does not match ticker timestamp")
 
         return self._close_long_with_ticker(
             position,
             record.ticker,
             reason=reason,
-            event_ns=event_ns,
+            event_ns=record.quote.ts_init,
             fee_schedule=self._fee_schedule(record),
         )
 
@@ -393,13 +504,9 @@ class PaperLedger:
         )
 
         underlying_quantity = position.contracts * position.contract_value
-        gross_pnl = (
-            ticker.best_bid - position.entry_price
-        ) * underlying_quantity
+        gross_pnl = (ticker.best_bid - position.entry_price) * underlying_quantity
         net_pnl = gross_pnl - position.entry_fee - fee.total_fee
-        exit_proceeds = (
-            ticker.best_bid * underlying_quantity
-        ) - fee.total_fee
+        exit_proceeds = (ticker.best_bid * underlying_quantity) - fee.total_fee
 
         closed_trade = PaperClosedTrade(
             position=position,
@@ -409,7 +516,7 @@ class PaperLedger:
             gross_pnl=gross_pnl,
             net_pnl=net_pnl,
             reason=reason,
-            closed_ns=event_ns,
+            closed_ns=max(event_ns, position.opened_ns),
         )
 
         self._cash += exit_proceeds
@@ -422,6 +529,8 @@ class PaperLedger:
         self,
         position: PaperPosition,
         ticker: DeltaOptionTicker,
+        *,
+        observed_ns: int | None = None,
     ) -> int:
         checks = (
             (
@@ -448,21 +557,23 @@ class PaperLedger:
 
         for matches, message in checks:
             if not matches:
-                raise ValueError(
-                    f"Exit ticker does not match position: {message}"
-                )
+                raise ValueError(f"Exit ticker does not match position: {message}")
 
         if ticker.trading_status != "operational":
             raise ValueError("Exit ticker is not operational")
 
         if ticker.exchange_timestamp <= 0:
-            raise ValueError(
-                "Exit ticker timestamp must be positive"
-            )
+            raise ValueError("Exit ticker timestamp must be positive")
 
         event_ns = ticker.exchange_timestamp * 1_000
 
-        if event_ns < position.opened_ns:
+        observed = time.time_ns() if observed_ns is None else observed_ns
+        from nautilus_delta_options.paper.quote_safety import validate_quote_time
+
+        validate_quote_time(event_ns, observed)
+        if event_ns < position.last_quote_ns:
+            raise ValueError("Exit ticker predates the position or latest observation")
+        if event_ns < position.opened_ns - 15_000_000_000:
             raise ValueError("Exit ticker predates the position")
 
         return event_ns

@@ -169,7 +169,15 @@ def parse_history_candles_payload(
 
         by_time[candle.time_s] = candle
 
-    return tuple(by_time[key] for key in sorted(by_time))
+    ordered = tuple(by_time[key] for key in sorted(by_time))
+    for i, candle in enumerate(ordered):
+        if candle.time_s < 0 or candle.time_s % seconds:
+            raise ValueError("Candle timestamps must align to resolution")
+        if min(candle.open, candle.high, candle.low, candle.close) <= 0:
+            raise ValueError("Candle prices must be positive")
+        if i and candle.time_s - ordered[i - 1].time_s != seconds:
+            raise ValueError("Candle history contains a gap")
+    return ordered
 
 
 def _integer(value: object, field: str) -> int:
@@ -185,6 +193,9 @@ def _decimal(value: object, field: str) -> Decimal:
     if isinstance(value, bool) or not isinstance(value, (str, int, float, Decimal)):
         raise ValueError(f"{field} must be numeric")
     try:
-        return Decimal(str(value))
+        result = Decimal(str(value))
+        if not result.is_finite():
+            raise ValueError(f"{field} must be finite")
+        return result
     except InvalidOperation as exc:
         raise ValueError(f"{field} must be numeric") from exc

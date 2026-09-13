@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from decimal import Decimal
 from threading import RLock
 from typing import Self
@@ -38,6 +39,7 @@ class PaperLedgerSession:
         self._ledger = ledger
         self._store = store
         self._lock = RLock()
+        self._revision = store.revision
 
     @classmethod
     def load_or_create(
@@ -86,7 +88,8 @@ class PaperLedgerSession:
         target_spot: Decimal,
     ) -> PaperPosition:
         with self._lock:
-            position = self._ledger.open_long(
+            candidate = _clone_ledger(self._ledger)
+            position = candidate.open_long(
                 record,
                 contracts=contracts,
                 stop_exit_bid=stop_exit_bid,
@@ -94,7 +97,7 @@ class PaperLedgerSession:
                 stop_spot=stop_spot,
                 target_spot=target_spot,
             )
-            self._store.save(self._ledger)
+            self._commit(candidate)
             return position
 
     def has_consumed_signal(self, signal_key: str) -> bool:
@@ -113,6 +116,7 @@ class PaperLedgerSession:
         target_exit_bid: Decimal,
         stop_spot: Decimal,
         target_spot: Decimal,
+        admission: Callable[[PaperLedger], None] | None = None,
     ) -> PaperPosition:
         with self._lock:
             if record.ticker.underlying != signal_underlying:
@@ -120,6 +124,8 @@ class PaperLedgerSession:
             if self._store.has_consumed_signal(signal_key):
                 raise PaperSignalAlreadyConsumedError(f"Signal already consumed: {signal_key}")
 
+            if admission is not None:
+                admission(_clone_ledger(self._ledger))
             candidate = _clone_ledger(self._ledger)
             position = candidate.open_long(
                 record,
@@ -135,12 +141,14 @@ class PaperLedgerSession:
                 underlying=signal_underlying,
                 candle_closed_ns=candle_closed_ns,
                 trade_id=position.trade_id,
+                expected_revision=self._revision,
             )
 
             if receipt is None:
                 raise PaperSignalAlreadyConsumedError(f"Signal already consumed: {signal_key}")
 
             self._ledger = candidate
+            self._revision = self._store.revision
             return position
 
     def process_exit(
@@ -149,13 +157,13 @@ class PaperLedgerSession:
         record: DeltaOptionMarketRecord,
     ) -> PaperClosedTrade | None:
         with self._lock:
-            closed_trade = self._ledger.process_exit(
+            candidate = _clone_ledger(self._ledger)
+            closed_trade = candidate.process_exit(
                 trade_id,
                 record,
             )
 
-            if closed_trade is not None:
-                self._store.save(self._ledger)
+            self._commit(candidate)
 
             return closed_trade
 
@@ -163,15 +171,20 @@ class PaperLedgerSession:
         self,
         trade_id: int,
         ticker: DeltaOptionTicker,
+        *,
+        observed_ns: int | None = None,
+        apply_time_policy: bool = False,
     ) -> PaperClosedTrade | None:
         with self._lock:
-            closed_trade = self._ledger.process_exit_ticker(
+            candidate = _clone_ledger(self._ledger)
+            closed_trade = candidate.process_exit_ticker(
                 trade_id,
                 ticker,
+                observed_ns=observed_ns,
+                apply_time_policy=apply_time_policy,
             )
 
-            if closed_trade is not None:
-                self._store.save(self._ledger)
+            self._commit(candidate)
 
             return closed_trade
 
@@ -183,13 +196,46 @@ class PaperLedgerSession:
         reason: ExitReason = ExitReason.MANUAL,
     ) -> PaperClosedTrade:
         with self._lock:
-            closed_trade = self._ledger.close_long(
+            candidate = _clone_ledger(self._ledger)
+            closed_trade = candidate.close_long(
                 trade_id,
                 record,
                 reason=reason,
             )
-            self._store.save(self._ledger)
+            self._commit(candidate)
             return closed_trade
+
+    def note_unresolved(self, trade_id: int, reason: str) -> None:
+        with self._lock:
+            candidate = _clone_ledger(self._ledger)
+            candidate.note_unresolved(trade_id, reason)
+            self._commit(candidate)
+
+    def settle_long(
+        self,
+        trade_id: int,
+        *,
+        settlement_spot: Decimal,
+        settlement_fee: Decimal,
+        observed_ns: int,
+        reference: str,
+    ) -> PaperClosedTrade:
+        with self._lock:
+            candidate = _clone_ledger(self._ledger)
+            trade = candidate.settle_long(
+                trade_id,
+                settlement_spot=settlement_spot,
+                settlement_fee=settlement_fee,
+                observed_ns=observed_ns,
+                reference=reference,
+            )
+            self._commit(candidate)
+            return trade
+
+    def _commit(self, candidate: PaperLedger) -> None:
+        self._store.save(candidate, expected_revision=self._revision)
+        self._ledger = candidate
+        self._revision = self._store.revision
 
 
 def _clone_ledger(ledger: PaperLedger) -> PaperLedger:

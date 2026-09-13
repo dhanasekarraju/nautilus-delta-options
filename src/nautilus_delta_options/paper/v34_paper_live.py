@@ -23,6 +23,7 @@ from nautilus_delta_options.delta.snapshot import (
     build_market_snapshot,
 )
 from nautilus_delta_options.paper.ledger import (
+    PaperLedger,
     PaperPosition,
 )
 from nautilus_delta_options.paper.portfolio_risk import (
@@ -501,7 +502,7 @@ def _try_open(
         config=portfolio_config,
     )
 
-    risk_decisions = (first_risk,)
+    risk_decisions: tuple[PortfolioRiskDecision, ...] = (first_risk,)
 
     if not first_risk.approved:
         return _result(
@@ -622,6 +623,26 @@ def _try_open(
             risk_decisions=risk_decisions,
         )
 
+    def admission(current: PaperLedger) -> None:
+        from nautilus_delta_options.paper.quote_safety import validate_quote_time
+
+        now = clock_ns()
+        validate_quote_time(refreshed.record.ticker.exchange_timestamp * 1000, now)
+        if not signal_is_fresh(
+            candle_close_ms=signal.candle_close_ms, observed_ns=now,
+            config=proposal_config.entry_safety,
+        ):
+            raise ValueError("Signal expired before ledger admission")
+        if _has_directional_position(current.open_positions, contract_type):
+            raise ValueError("Directional exposure changed before ledger admission")
+        if not evaluate_portfolio_entry(
+            current, refreshed, config=portfolio_config, observed_ns=now,
+        ).approved:
+            raise ValueError("Portfolio exposure changed before ledger admission")
+        _, complete = current.liquidation_equity(observed_ns=now)
+        if not complete:
+            raise ValueError("Unresolved or stale open-position valuation")
+
     try:
         position = session.open_long_for_signal(
             refreshed.record,
@@ -640,6 +661,7 @@ def _try_open(
             ),
             stop_spot=refreshed.levels.stop_spot,
             target_spot=refreshed.levels.target_spot,
+            admission=admission,
         )
     except PaperSignalAlreadyConsumedError:
         return _result(

@@ -83,7 +83,7 @@ def test_history_parser_drops_incomplete_candle() -> None:
         "success": True,
         "result": [
             {
-                "time": 1000,
+                "time": 900,
                 "open": 10,
                 "high": 12,
                 "low": 9,
@@ -91,7 +91,7 @@ def test_history_parser_drops_incomplete_candle() -> None:
                 "volume": 5,
             },
             {
-                "time": 1300,
+                "time": 1200,
                 "open": 11,
                 "high": 13,
                 "low": 10,
@@ -103,11 +103,11 @@ def test_history_parser_drops_incomplete_candle() -> None:
 
     candles = parse_history_candles_payload(
         payload,
-        now_s=1500,
+        now_s=1400,
     )
 
     assert len(candles) == 1
-    assert candles[0].time_s == 1000
+    assert candles[0].time_s == 900
 
 
 def test_v34_blocks_zero_dte() -> None:

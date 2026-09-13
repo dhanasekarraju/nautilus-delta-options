@@ -1,0 +1,27 @@
+name: nautilus-delta-options-v34
+services:
+  dashboard:
+    build: .
+    image: nautilus-delta-options:v34-paper
+    entrypoint: ["python", "-m", "uvicorn"]
+    command: ["nautilus_delta_options.web.v34_paper_app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--no-access-log"]
+    ports: ["127.0.0.1:8014:8000"]
+    volumes: ["v34_paper_data:/data"]
+    environment:
+      V34_PAPER_DATABASE: /data/v34-paper.sqlite
+      V34_PAPER_ENTRIES_ENABLED: "${V34_PAPER_ENTRIES_ENABLED:-false}"
+      TZ: UTC
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,urllib.request; d=json.load(urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4)); assert d['status']=='ready'"]
+      interval: 30s
+      timeout: 5s
+      start_period: 660s
+      retries: 3
+    read_only: true
+    tmpfs: ["/tmp:size=64m,mode=1777"]
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    init: true
+    restart: unless-stopped
+volumes:
+  v34_paper_data:

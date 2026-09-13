@@ -138,7 +138,10 @@ def _decimal(value: object, field: str) -> Decimal:
     if isinstance(value, bool) or not isinstance(value, (str, int, float, Decimal)):
         raise ValueError(f"{field} must be numeric")
     try:
-        return Decimal(str(value))
+        result = Decimal(str(value))
+        if not result.is_finite():
+            raise ValueError(f"{field} must be finite")
+        return result
     except InvalidOperation as exc:
         raise ValueError(f"{field} must be numeric") from exc
 

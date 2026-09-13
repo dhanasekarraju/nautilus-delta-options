@@ -64,10 +64,14 @@ def evaluate_portfolio_entry(
     proposal: PaperEntryProposal,
     *,
     config: PortfolioRiskConfig | None = None,
+    observed_ns: int | None = None,
 ) -> PortfolioRiskDecision:
     resolved_config = config or PortfolioRiskConfig()
     positions = ledger.open_positions
     account_equity = ledger.initial_cash + ledger.realized_pnl
+    if observed_ns is not None:
+        liquidation, complete = ledger.liquidation_equity(observed_ns=observed_ns)
+        account_equity = min(account_equity, liquidation) if complete else Decimal("0")
     planned_loss_limit = account_equity * resolved_config.max_planned_loss_fraction
     premium_exposure_limit = account_equity * resolved_config.max_premium_exposure_fraction
 

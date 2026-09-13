@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import AsyncIterator
+from typing import cast
 
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
@@ -18,6 +20,7 @@ from nautilus_delta_options.delta.history import (
 )
 from nautilus_delta_options.delta.public_client import (
     DeltaPublicClient,
+    DeltaUnderlying,
 )
 from nautilus_delta_options.paper.fast_exit import (
     run_fast_exit_cycle,
@@ -70,6 +73,8 @@ class V34PaperServiceState:
     slow_exit_warnings: tuple[str, ...] = ()
 
     error: str | None = None
+    last_signal_success_at: str | None = None
+    signal_warnings: tuple[str, ...] = ()
 
 
 def create_v34_paper_app(
@@ -258,9 +263,10 @@ def create_v34_paper_app(
         return {
             "status": (
                 "error"
-                if state.error is not None
+                if _health_errors(state)
                 else "ready"
             ),
+            "errors": _health_errors(state),
             "mode": "paper_live",
             "strategy": "v3.4",
             "real_orders_enabled": False,
@@ -302,7 +308,12 @@ async def _poll_v34_signals(
             state.updated_at = (
                 datetime.now(UTC).isoformat()
             )
-            state.error = None
+            state.signal_warnings = cycle.warnings
+            if cycle.warnings:
+                state.error = "; ".join(cycle.warnings)
+            elif cycle.evaluated:
+                state.error = None
+                state.last_signal_success_at = state.updated_at
 
             # Keep the last genuine completed-candle
             # evaluation visible on the dashboard.
@@ -384,7 +395,7 @@ async def _poll_fast_exits(
         try:
             cycle = await asyncio.to_thread(
                 run_fast_exit_cycle,
-                client=delta_client,
+                apply_time_policy=True,                client=delta_client,
                 session=session,
             )
 
@@ -654,7 +665,7 @@ def _dashboard_payload(
             payload = v34_shadow_signal_payload(
                 signal,
                 quality_by_underlying.get(
-                    signal.underlying,
+                    cast(DeltaUnderlying, signal.underlying),
                 ),
             )
 
@@ -667,18 +678,26 @@ def _dashboard_payload(
             signals.append(payload)
 
     reserved = len(closed) + len(positions)
+    equity, marks_complete = ledger.liquidation_equity(
+        observed_ns=int(datetime.now(UTC).timestamp() * 1_000_000_000),
+    )
 
     return {
         "status": (
             "error"
-            if state.error is not None
+            if _health_errors(state)
             else "ready"
         ),
         "mode": "V3.4 PAPER-LIVE",
+        "liquidation_equity": str(equity),
+        "valuation_complete": marks_complete,
+        "unrealized_pnl": str(equity - ledger.initial_cash - ledger.realized_pnl)
+        if marks_complete else None,
+        "application_runtime": "Python 3.12 / Docker",
         "paper_only": True,
         "real_orders_enabled": False,
         "paper_entries_enabled": entries_enabled,
-        "error": state.error,
+        "error": "; ".join(_health_errors(state)) or None,
         "started_at": state.started_at,
         "updated_at": state.updated_at,
         "sample": {
@@ -740,9 +759,7 @@ def _dashboard_payload(
         ],
         "warnings": {
             "shadow": (
-                list(state.latest_cycle.warnings)
-                if state.latest_cycle is not None
-                else []
+                list(state.signal_warnings)
             ),
             "fast_exit": list(
                 state.fast_exit_warnings,
@@ -821,6 +838,21 @@ def _closed_trade_payload(
     }
 
 
+def _health_errors(state: V34PaperServiceState) -> list[str]:
+    errors = [state.error] if state.error else []
+    errors.extend(state.fast_exit_warnings)
+    errors.extend(state.slow_exit_warnings)
+    now = datetime.now(UTC)
+    for label, stamp, limit in (
+        ("signal", state.last_signal_success_at, 660),
+        ("fast exit", state.latest_fast_exit_at, 60),
+        ("slow exit", state.latest_slow_exit_at, 180),
+    ):
+        if stamp is None or (now - datetime.fromisoformat(stamp)).total_seconds() > limit:
+            errors.append(f"{label}: no recent successful observation")
+    return errors
+
+
 def _boolean_env(
     name: str,
     default: bool,
@@ -861,7 +893,7 @@ def _positive_float_env(
         os.getenv(name, str(default)),
     )
 
-    if value <= 0:
+    if not math.isfinite(value) or value <= 0:
         raise ValueError(
             f"{name} must be positive",
         )
@@ -877,7 +909,7 @@ def _positive_int_env(
         os.getenv(name, str(default)),
     )
 
-    if value <= 0:
+    if not math.isfinite(value) or value <= 0:
         raise ValueError(
             f"{name} must be positive",
         )
