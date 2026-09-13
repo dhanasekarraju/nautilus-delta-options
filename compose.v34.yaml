@@ -10,6 +10,8 @@ services:
     environment:
       V34_PAPER_DATABASE: /data/v34-paper.sqlite
       V34_PAPER_ENTRIES_ENABLED: "${V34_PAPER_ENTRIES_ENABLED:-false}"
+      V34_PAYOFF_PROFILE: "${V34_PAYOFF_PROFILE:-baseline_v34}"
+      V34_PAYOFF_PENALTY: "${V34_PAYOFF_PENALTY:-0}"
       TZ: UTC
     healthcheck:
       test: ["CMD", "python", "-c", "import json,urllib.request; d=json.load(urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4)); assert d['status']=='ready'"]

@@ -1,5 +1,6 @@
+import json
 import time
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from decimal import Decimal
 from enum import StrEnum
 
@@ -52,6 +53,7 @@ class PaperPosition:
     settlement_ns: int = 0
     strike_price: Decimal = Decimal("0")
     unresolved_reason: str | None = None
+    entry_observation: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,6 +256,11 @@ class PaperLedger:
             contract_type=ticker.contract_type,
             contracts=contracts,
             contract_value=ticker.contract_value,
+            entry_observation=json.dumps(
+                {"payoff_profile": "baseline_v34",
+                 "ticker": asdict(ticker), "observed_ns": record.quote.ts_init},
+                default=str, sort_keys=True,
+            ),
             entry_price=ticker.best_ask,
             entry_spot=ticker.spot_price,
             entry_premium=entry_premium,

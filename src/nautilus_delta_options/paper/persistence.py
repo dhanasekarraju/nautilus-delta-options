@@ -353,6 +353,7 @@ def _position_to_payload(position: PaperPosition) -> dict[str, object]:
         "planned_reward": str(position.planned_reward),
         "taker_fee": str(position.taker_fee),
         "premium_cap_rate": str(position.premium_cap_rate),
+        "entry_observation": position.entry_observation,
         "last_quote_ns": position.last_quote_ns,
         "last_bid": str(position.last_bid) if position.last_bid is not None else None,
         "last_exit_fee": str(position.last_exit_fee)
@@ -454,6 +455,9 @@ def _position_from_payload(value: object) -> PaperPosition:
             payload,
             "taker_fee",
             default=Decimal("0.0001"),
+        ),
+        entry_observation=(
+            _require_string(payload, "entry_observation") if "entry_observation" in payload else ""
         ),
         last_quote_ns=_require_int(payload, "last_quote_ns") if "last_quote_ns" in payload else 0,
         last_bid=_require_decimal(payload, "last_bid") if payload.get("last_bid") else None,

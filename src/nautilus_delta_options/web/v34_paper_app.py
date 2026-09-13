@@ -28,6 +28,8 @@ from nautilus_delta_options.paper.fast_exit import (
 from nautilus_delta_options.paper.observer import (
     PaperDryRunObserver,
 )
+from nautilus_delta_options.paper.payoff_profiles import PayoffProfile
+from nautilus_delta_options.paper.payoff_research import PayoffResearch
 from nautilus_delta_options.paper.persistence import (
     SQLitePaperLedgerStore,
 )
@@ -151,6 +153,13 @@ def create_v34_paper_app(
         max_positions=max_positions,
     )
 
+    research = PayoffResearch(
+        Path(os.getenv("V34_PAYOFF_DATABASE", str(resolved_database) + ".payoff.sqlite")),
+        profile=PayoffProfile(os.getenv("V34_PAYOFF_PROFILE", "baseline_v34")),
+        gst=session.snapshot().gst_rate,
+        penalty=_decimal_env("V34_PAYOFF_PENALTY", "0"),
+    )
+
     delta_client = DeltaPublicClient()
     history_client = DeltaHistoryClient()
 
@@ -203,6 +212,7 @@ def create_v34_paper_app(
                 session=session,
                 state=state,
                 interval_seconds=fast_exit_interval,
+                research=research,
             ),
         )
 
@@ -247,6 +257,10 @@ def create_v34_paper_app(
                 encoding="utf-8",
             ),
         )
+
+    @application.get("/api/payoff-research")
+    def payoff_research_data() -> dict[str, object]:
+        return research.summary()
 
     @application.get("/api/dashboard")
     def dashboard_data() -> dict[str, object]:
@@ -390,12 +404,26 @@ async def _poll_fast_exits(
     session: PaperLedgerSession,
     state: V34PaperServiceState,
     interval_seconds: float,
+    research: PayoffResearch | None = None,
 ) -> None:
     while True:
         try:
+            extra_symbols: tuple[str, ...] = ()
+            research_warning: tuple[str, ...] = ()
+            active_research = research
+            if research is not None:
+                try:
+                    await asyncio.to_thread(research.sync_entries, session.snapshot())
+                    extra_symbols = await asyncio.to_thread(research.symbols)
+                except Exception as error:
+                    research_warning = (f"Payoff research synchronization failed: {error}",)
+                    active_research = None
             cycle = await asyncio.to_thread(
                 run_fast_exit_cycle,
-                apply_time_policy=True,                client=delta_client,
+                apply_time_policy=True,
+                client=delta_client,
+                extra_symbols=extra_symbols,
+                on_quote=active_research.on_quote if active_research is not None else None,
                 session=session,
             )
 
@@ -403,7 +431,7 @@ async def _poll_fast_exits(
                 datetime.now(UTC).isoformat()
             )
             state.fast_exit_warnings = (
-                cycle.warnings
+                (*cycle.warnings, *research_warning)
             )
 
             for trade in cycle.closed_trades:
