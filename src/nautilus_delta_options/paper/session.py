@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from decimal import Decimal
 from threading import RLock
 from typing import Self
@@ -101,6 +102,7 @@ class PaperLedgerSession:
                 target_exit_bid=target_exit_bid,
                 stop_spot=stop_spot,
                 target_spot=target_spot,
+                provenance=self._store.run_provenance,
             )
             self._commit(candidate)
             return position
@@ -122,6 +124,7 @@ class PaperLedgerSession:
         stop_spot: Decimal,
         target_spot: Decimal,
         admission: Callable[[PaperLedger], None] | None = None,
+        readiness_guard: Callable[[], AbstractContextManager[None]] | None = None,
     ) -> PaperPosition:
         with self._lock:
             if record.ticker.underlying != signal_underlying:
@@ -129,8 +132,6 @@ class PaperLedgerSession:
             if self._store.has_consumed_signal(signal_key):
                 raise PaperSignalAlreadyConsumedError(f"Signal already consumed: {signal_key}")
 
-            if admission is not None:
-                admission(_clone_ledger(self._ledger))
             candidate = _clone_ledger(self._ledger)
             position = candidate.open_long(
                 record,
@@ -139,6 +140,7 @@ class PaperLedgerSession:
                 target_exit_bid=target_exit_bid,
                 stop_spot=stop_spot,
                 target_spot=target_spot,
+                provenance=self._store.run_provenance,
             )
             receipt = self._store.save_with_signal(
                 candidate,
@@ -147,6 +149,9 @@ class PaperLedgerSession:
                 candle_closed_ns=candle_closed_ns,
                 trade_id=position.trade_id,
                 expected_revision=self._revision,
+                before_commit=(lambda: admission(_clone_ledger(self._ledger)))
+                if admission is not None else None,
+                readiness_guard=readiness_guard,
             )
 
             if receipt is None:

@@ -189,6 +189,7 @@ class PaperLedger:
         target_exit_bid: Decimal,
         stop_spot: Decimal,
         target_spot: Decimal,
+        provenance: dict[str, object] | None = None,
     ) -> PaperPosition:
         if not record.eligibility.eligible:
             raise ValueError("Market record is not eligible")
@@ -257,7 +258,7 @@ class PaperLedger:
             contracts=contracts,
             contract_value=ticker.contract_value,
             entry_observation=json.dumps(
-                {"payoff_profile": "baseline_v34",
+                {"payoff_profile": "baseline_v34", "provenance": provenance,
                  "ticker": asdict(ticker), "observed_ns": record.quote.ts_init},
                 default=str, sort_keys=True,
             ),
@@ -578,7 +579,7 @@ class PaperLedger:
         from nautilus_delta_options.paper.quote_safety import validate_quote_time
 
         validate_quote_time(event_ns, observed)
-        if position.settlement_ns > 0 and observed >= position.settlement_ns:
+        if position.settlement_ns > 0 and max(observed, event_ns) >= position.settlement_ns:
             raise ValueError("Contract expired; verified settlement reconciliation is required")
         for value in (ticker.best_bid, ticker.best_ask, ticker.bid_size,
                       ticker.ask_size, ticker.spot_price):

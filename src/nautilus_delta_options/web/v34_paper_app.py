@@ -4,12 +4,14 @@ import asyncio
 import logging
 import math
 import os
-from collections.abc import AsyncIterator
-from contextlib import ExitStack, asynccontextmanager, suppress
-from dataclasses import dataclass
+import time
+from collections.abc import AsyncIterator, Iterator
+from contextlib import ExitStack, asynccontextmanager, contextmanager, suppress
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
+from threading import Event, RLock
 from typing import cast
 
 from fastapi import FastAPI, Response
@@ -22,6 +24,7 @@ from nautilus_delta_options.delta.public_client import (
     DeltaPublicClient,
     DeltaUnderlying,
 )
+from nautilus_delta_options.paper.exit_policy import PaperExitPolicyConfig
 from nautilus_delta_options.paper.fast_exit import (
     run_fast_exit_cycle,
 )
@@ -33,6 +36,8 @@ from nautilus_delta_options.paper.payoff_research import PayoffResearch
 from nautilus_delta_options.paper.persistence import (
     SQLitePaperLedgerStore,
 )
+from nautilus_delta_options.paper.portfolio_risk import PortfolioRiskConfig
+from nautilus_delta_options.paper.provenance import bind_provenance, make_provenance
 from nautilus_delta_options.paper.session import (
     PaperLedgerSession,
 )
@@ -47,7 +52,9 @@ from nautilus_delta_options.paper.v34_shadow import (
     V34ShadowObserver,
     v34_shadow_signal_payload,
 )
+from nautilus_delta_options.selection.v34_quality import V34QualityConfig
 from nautilus_delta_options.signals.v34 import (
+    V34Config,
     V34Decision,
 )
 from nautilus_delta_options.web.lifecycle import DatabaseLease, run_blocking
@@ -64,6 +71,10 @@ _TARGET_CLOSED_TRADES = 20
 @dataclass(slots=True)
 class V34PaperServiceState:
     started_at: str
+    admission_lock: RLock = field(default_factory=RLock)
+    stopping: Event = field(default_factory=Event)
+    loop_monotonic: dict[str, float] = field(default_factory=dict)
+    provenance: dict[str, object] = field(default_factory=dict)
     updated_at: str | None = None
 
     latest_cycle: V34ShadowCycle | None = None
@@ -154,7 +165,9 @@ def create_v34_paper_app(
     research_database = Path(
         os.getenv("V34_PAYOFF_DATABASE", str(resolved_database) + ".payoff.sqlite"),
     )
-    if research_database.resolve() == resolved_database.resolve():
+    if (research_database.resolve() == resolved_database.resolve()
+        or (research_database.exists() and resolved_database.exists()
+            and research_database.samefile(resolved_database))):
         raise ValueError("Primary and research databases must have distinct paths")
 
     store = SQLitePaperLedgerStore(
@@ -174,8 +187,9 @@ def create_v34_paper_app(
         penalty=_decimal_env("V34_PAYOFF_PENALTY", "0"),
     )
 
-    delta_client = DeltaPublicClient()
-    history_client = DeltaHistoryClient()
+    shutdown = Event()
+    delta_client = DeltaPublicClient(stop_event=shutdown)
+    history_client = DeltaHistoryClient(stop_event=shutdown)
 
     proposal_config = (
         default_v34_paper_proposal_config()
@@ -201,8 +215,22 @@ def create_v34_paper_app(
         entries_enabled=False,
     )
 
+    provenance = make_provenance({
+        "initial_cash": initial_cash, "minimum_reward_risk": minimum_reward_risk,
+        "max_positions": max_positions, "gst": session.snapshot().gst_rate,
+        "payoff_profile": research.profile.value, "penalty": research.penalty,
+        "signal_interval": signal_interval, "fast_exit_interval": fast_exit_interval,
+        "slow_exit_interval": slow_exit_interval,
+        "signal": asdict(V34Config()), "quality": asdict(V34QualityConfig()),
+        "portfolio": asdict(PortfolioRiskConfig()), "exit": asdict(PaperExitPolicyConfig()),
+        "proposal": asdict(proposal_config), "eligibility": asdict(eligibility_config),
+    })
+    provenance["entries_enabled_at_start"] = resolved_entries_enabled
+
     state = V34PaperServiceState(
         started_at=datetime.now(UTC).isoformat(),
+        stopping=shutdown,
+        provenance=provenance,
     )
 
     @asynccontextmanager
@@ -219,6 +247,11 @@ def create_v34_paper_app(
                 raise RuntimeError("Primary ledger disappeared before service startup")
             if store.revision != session.revision:
                 raise RuntimeError("Primary ledger changed before startup; recreate the service")
+            for path in (resolved_database, research_database):
+                bind_provenance(path, provenance, check_only=True)
+            for path in (resolved_database, research_database):
+                bind_provenance(path, provenance)
+            store.run_provenance = provenance
             signal_task = asyncio.create_task(
                 _poll_v34_signals(
                     observer=v34_observer,
@@ -257,6 +290,8 @@ def create_v34_paper_app(
             try:
                 yield
             finally:
+                with state.admission_lock:
+                    state.stopping.set()
                 for task in tasks:
                     task.cancel()
 
@@ -307,6 +342,7 @@ def create_v34_paper_app(
                 else "ready"
             ),
             "errors": errors,
+            "provenance": state.provenance,
             "mode": "paper_live",
             "strategy": "v3.4",
             "real_orders_enabled": False,
@@ -345,15 +381,19 @@ async def _poll_v34_signals(
                 observer.run_cycle,
             )
 
-            state.updated_at = (
-                datetime.now(UTC).isoformat()
-            )
-            state.signal_warnings = cycle.warnings
-            if cycle.warnings:
-                state.error = "; ".join(cycle.warnings)
-            elif cycle.evaluated:
-                state.error = None
-                state.last_signal_success_at = state.updated_at
+            with state.admission_lock:
+                state.updated_at = (
+                    datetime.now(UTC).isoformat()
+                )
+                state.signal_warnings = cycle.warnings
+                if cycle.warnings:
+                    state.error = "; ".join(cycle.warnings)
+                elif cycle.evaluated:
+                    state.error = None
+                    state.last_signal_success_at = state.updated_at
+
+                if cycle.evaluated and not cycle.warnings:
+                    state.loop_monotonic["signal"] = time.monotonic()
 
             # Keep the last genuine completed-candle
             # evaluation visible on the dashboard.
@@ -389,6 +429,7 @@ async def _poll_v34_signals(
                             cycle=entry_cycle,
                             delta_client=delta_client,
                             session=session,
+                            readiness_guard=lambda: _required_readiness(state),
                         )
                     )
 
@@ -415,9 +456,10 @@ async def _poll_v34_signals(
             raise
 
         except Exception as error:
-            state.error = (
-                f"V3.4 signal loop: {error}"
-            )
+            with state.admission_lock:
+                state.error = (
+                    f"V3.4 signal loop: {error}"
+                )
             _LOGGER.exception(
                 "V34_PAPER_SIGNAL_LOOP_FAILED",
             )
@@ -454,12 +496,15 @@ async def _poll_fast_exits(
                 session=session,
             )
 
-            state.latest_fast_exit_at = (
-                datetime.now(UTC).isoformat()
-            )
-            state.fast_exit_warnings = (
-                (*cycle.warnings, *research_warning)
-            )
+            with state.admission_lock:
+                state.latest_fast_exit_at = (
+                    datetime.now(UTC).isoformat()
+                )
+                state.fast_exit_warnings = (
+                    (*cycle.warnings, *research_warning)
+                )
+
+                state.loop_monotonic["fast exit"] = time.monotonic()
 
             for trade in cycle.closed_trades:
                 _LOGGER.info(
@@ -478,9 +523,10 @@ async def _poll_fast_exits(
             raise
 
         except Exception as error:
-            state.fast_exit_warnings = (
-                str(error),
-            )
+            with state.admission_lock:
+                state.fast_exit_warnings = (
+                    str(error),
+                )
             _LOGGER.exception(
                 "V34_PAPER_FAST_EXIT_FAILED",
             )
@@ -500,12 +546,15 @@ async def _poll_slow_exits(
                 observer.run_cycle,
             )
 
-            state.latest_slow_exit_at = (
-                datetime.now(UTC).isoformat()
-            )
-            state.slow_exit_warnings = (
-                cycle.warnings
-            )
+            with state.admission_lock:
+                state.latest_slow_exit_at = (
+                    datetime.now(UTC).isoformat()
+                )
+                state.slow_exit_warnings = (
+                    cycle.warnings
+                )
+
+                state.loop_monotonic["slow exit"] = time.monotonic()
 
             for trade in cycle.closed_trades:
                 _LOGGER.info(
@@ -524,9 +573,10 @@ async def _poll_slow_exits(
             raise
 
         except Exception as error:
-            state.slow_exit_warnings = (
-                str(error),
-            )
+            with state.admission_lock:
+                state.slow_exit_warnings = (
+                    str(error),
+                )
             _LOGGER.exception(
                 "V34_PAPER_SLOW_EXIT_FAILED",
             )
@@ -743,6 +793,7 @@ def _dashboard_payload(
             if _health_errors(state)
             else "ready"
         ),
+        "provenance": state.provenance,
         "mode": "V3.4 PAPER-LIVE",
         "liquidation_equity": str(equity),
         "valuation_complete": marks_complete,
@@ -893,19 +944,38 @@ def _closed_trade_payload(
     }
 
 
+@contextmanager
+def _required_readiness(state: V34PaperServiceState) -> Iterator[None]:
+    with state.admission_lock:
+        errors = _health_errors(state)
+        if errors:
+            raise ValueError("Required service readiness failed at admission: " + "; ".join(errors))
+        yield
+
+
 def _health_errors(state: V34PaperServiceState) -> list[str]:
-    errors = [state.error] if state.error else []
-    errors.extend(state.fast_exit_warnings)
-    errors.extend(state.slow_exit_warnings)
-    now = datetime.now(UTC)
-    for label, stamp, limit in (
-        ("signal", state.last_signal_success_at, 660),
-        ("fast exit", state.latest_fast_exit_at, 60),
-        ("slow exit", state.latest_slow_exit_at, 180),
-    ):
-        if stamp is None or (now - datetime.fromisoformat(stamp)).total_seconds() > limit:
-            errors.append(f"{label}: no recent successful observation")
-    return errors
+    with state.admission_lock:
+        errors = [state.error] if state.error else []
+        errors.extend(state.signal_warnings)
+        errors.extend(state.fast_exit_warnings)
+        errors.extend(state.slow_exit_warnings)
+        if state.stopping.is_set():
+            errors.append("service is stopping")
+        now = datetime.now(UTC)
+        for label, stamp, limit in (
+            ("signal", state.last_signal_success_at, 660),
+            ("fast exit", state.latest_fast_exit_at, 60),
+            ("slow exit", state.latest_slow_exit_at, 180),
+        ):
+            try:
+                age = (now - datetime.fromisoformat(stamp)).total_seconds() if stamp else None
+            except (ValueError, TypeError):
+                age = None
+            mono = state.loop_monotonic.get(label)
+            if (age is None or age < -5 or age > limit
+                    or (mono is not None and time.monotonic() - mono > limit)):
+                errors.append(f"{label}: no recent successful observation")
+        return errors
 
 
 def _boolean_env(

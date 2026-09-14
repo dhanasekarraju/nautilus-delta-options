@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
-from collections.abc import Mapping
-from contextlib import closing
+from collections.abc import Callable, Mapping
+from contextlib import AbstractContextManager, closing, nullcontext
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -38,6 +38,7 @@ class SQLitePaperLedgerStore:
 
     def __init__(self, path: str | Path) -> None:
         self._revision: int | None = None
+        self.run_provenance: dict[str, object] | None = None
         self._path = Path(path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
@@ -131,6 +132,8 @@ class SQLitePaperLedgerStore:
         candle_closed_ns: int,
         trade_id: int,
         expected_revision: int | None = None,
+        before_commit: Callable[[], None] | None = None,
+        readiness_guard: Callable[[], AbstractContextManager[None]] | None = None,
     ) -> PaperSignalReceipt | None:
         _validate_signal_metadata(
             signal_key=signal_key,
@@ -180,46 +183,50 @@ class SQLitePaperLedgerStore:
                 connection,
                 self._revision if expected_revision is None else expected_revision,
             )
-            try:
-                connection.execute(
-                    """
-                    INSERT INTO paper_signal_receipts (
-                        signal_key,
-                        underlying,
-                        candle_closed_ns,
-                        trade_id,
-                        consumed_ns
+            with readiness_guard() if readiness_guard is not None else nullcontext():
+                if before_commit is not None:
+                    before_commit()
+                try:
+                    connection.execute(
+                        """
+                        INSERT INTO paper_signal_receipts (
+                            signal_key,
+                            underlying,
+                            candle_closed_ns,
+                            trade_id,
+                            consumed_ns
+                        )
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (
+                            signal_key,
+                            underlying,
+                            candle_closed_ns,
+                            trade_id,
+                            consumed_ns,
+                        ),
                     )
-                    VALUES (?, ?, ?, ?, ?)
-                    """,
-                    (
-                        signal_key,
-                        underlying,
-                        candle_closed_ns,
-                        trade_id,
-                        consumed_ns,
-                    ),
-                )
-                connection.execute(
-                    """
-                    INSERT INTO paper_ledger_state (
-                        id,
-                        schema_version,
-                        payload,
-                        updated_ns
+                    connection.execute(
+                        """
+                        INSERT INTO paper_ledger_state (
+                            id,
+                            schema_version,
+                            payload,
+                            updated_ns
+                        )
+                        VALUES (1, ?, ?, ?)
+                        ON CONFLICT(id) DO UPDATE SET
+                            schema_version = excluded.schema_version,
+                            payload = excluded.payload,
+                            updated_ns = excluded.updated_ns
+                        """,
+                        (_SCHEMA_VERSION, payload, consumed_ns),
                     )
-                    VALUES (1, ?, ?, ?)
-                    ON CONFLICT(id) DO UPDATE SET
-                        schema_version = excluded.schema_version,
-                        payload = excluded.payload,
-                        updated_ns = excluded.updated_ns
-                    """,
-                    (_SCHEMA_VERSION, payload, consumed_ns),
-                )
-            except sqlite3.IntegrityError as error:
-                raise PaperLedgerPersistenceError(
-                    "Signal receipt conflicts with persisted state"
-                ) from error
+                    connection.commit()
+                except sqlite3.IntegrityError as error:
+                    raise PaperLedgerPersistenceError(
+                        "Signal receipt conflicts with persisted state"
+                    ) from error
 
         self._revision = consumed_ns
         return receipt

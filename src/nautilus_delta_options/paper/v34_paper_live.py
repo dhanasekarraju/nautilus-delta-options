@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -189,6 +190,7 @@ def run_v34_paper_entry_cycle(
     quality_config: V34QualityConfig | None = None,
     clock_ns: Callable[[], int] = time.time_ns,
     as_of: date | None = None,
+    readiness_guard: Callable[[], AbstractContextManager[None]] | None = None,
 ) -> V34PaperEntryCycle:
     resolved_proposal = (
         proposal_config
@@ -331,6 +333,7 @@ def run_v34_paper_entry_cycle(
                 quality_config=resolved_quality,
                 clock_ns=clock_ns,
                 as_of=cycle_date,
+                readiness_guard=readiness_guard,
             )
 
             results[index] = result
@@ -390,6 +393,7 @@ def _try_open(
     quality_config: V34QualityConfig,
     clock_ns: Callable[[], int],
     as_of: date,
+    readiness_guard: Callable[[], AbstractContextManager[None]] | None = None,
 ) -> V34PaperEntryResult:
     contract_type = _contract_type_for(signal)
     episode_key = v34_paper_episode_key(signal)
@@ -662,6 +666,7 @@ def _try_open(
             stop_spot=refreshed.levels.stop_spot,
             target_spot=refreshed.levels.target_spot,
             admission=admission,
+            readiness_guard=readiness_guard,
         )
     except PaperSignalAlreadyConsumedError:
         return _result(

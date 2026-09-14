@@ -1,15 +1,16 @@
 from __future__ import annotations
 
-import json
+import math
 import time
 import urllib.parse
-import urllib.request
 from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from threading import Event
 from typing import Literal, cast
 
 from nautilus_delta_options.delta.public_client import DeltaUnderlying
+from nautilus_delta_options.public_http import public_json
 
 type DeltaCandleResolution = Literal["5m"]
 
@@ -50,13 +51,15 @@ class DeltaHistoryClient:
         *,
         base_url: str = "https://api.india.delta.exchange",
         timeout_seconds: float = 20.0,
+        stop_event: Event | None = None,
     ) -> None:
         if not base_url.startswith("https://"):
             raise ValueError("base_url must use HTTPS")
-        if timeout_seconds <= 0:
+        if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
         self._base_url = base_url.rstrip("/")
         self._timeout_seconds = timeout_seconds
+        self._stop_event = stop_event
 
     def fetch_5m_candles(
         self,
@@ -87,19 +90,7 @@ class DeltaHistoryClient:
             }
         )
         url = f"{self._base_url}/v2/history/candles?{params}"
-        request = urllib.request.Request(
-            url,
-            headers={
-                "Accept": "application/json",
-                "User-Agent": "nautilus-delta-options/0.1",
-            },
-        )
-
-        with urllib.request.urlopen(
-            request,
-            timeout=self._timeout_seconds,
-        ) as response:
-            payload = cast(object, json.load(response))
+        payload = public_json(url, timeout=self._timeout_seconds, stop=self._stop_event)
 
         candles = parse_history_candles_payload(
             payload,

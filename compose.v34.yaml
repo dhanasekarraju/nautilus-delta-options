@@ -4,6 +4,8 @@ services:
     build:
       context: .
       target: runtime
+      args:
+        NAUTILUS_BUILD_ID: "${NAUTILUS_BUILD_ID:-}"
     image: nautilus-delta-options:v34-paper
     entrypoint: ["python", "-m", "uvicorn"]
     command: ["nautilus_delta_options.web.v34_paper_app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--no-access-log"]

@@ -254,6 +254,7 @@
       </table>
     </div>
   </section>
+<section><h2>Validation run identity</h2><pre id="provenance" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre></section>
 </main>
 
 <script>
@@ -366,6 +367,7 @@ async function refresh() {
 
     const d = await r.json();
 
+    document.getElementById("provenance").textContent = JSON.stringify(d.provenance || {}, null, 2);
     const s = d.sample || {};
     const w = d.wallet || {};
     const p = d.performance || {};

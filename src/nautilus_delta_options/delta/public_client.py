@@ -1,12 +1,13 @@
-import json
+import math
 import urllib.parse
-import urllib.request
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from threading import Event
 from typing import Literal, cast
 
 from nautilus_delta_options.delta.models import DeltaOptionTicker
 from nautilus_delta_options.delta.product import DeltaOptionProduct
+from nautilus_delta_options.public_http import public_json
 
 type DeltaUnderlying = Literal["BTC", "ETH"]
 
@@ -35,14 +36,16 @@ class DeltaPublicClient:
         *,
         base_url: str = "https://api.india.delta.exchange",
         timeout_seconds: float = 20.0,
+        stop_event: Event | None = None,
     ) -> None:
         if not base_url.startswith("https://"):
             raise ValueError("base_url must use HTTPS")
-        if timeout_seconds <= 0:
+        if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
 
         self._base_url = base_url.rstrip("/")
         self._timeout_seconds = timeout_seconds
+        self._stop_event = stop_event
 
     def fetch_option_chain(
         self,
@@ -110,19 +113,7 @@ class DeltaPublicClient:
         )
         url = f"{self._base_url}/v2/tickers/{encoded_symbols}"
 
-        request = urllib.request.Request(
-            url,
-            headers={
-                "Accept": "application/json",
-                "User-Agent": "nautilus-delta-options/0.1",
-            },
-        )
-
-        with urllib.request.urlopen(
-            request,
-            timeout=self._timeout_seconds,
-        ) as response:
-            payload = cast(object, json.load(response))
+        payload = public_json(url, timeout=self._timeout_seconds, stop=self._stop_event)
 
         return parse_option_tickers_payload(
             payload,
@@ -146,19 +137,7 @@ class DeltaPublicClient:
             params += "&" + urllib.parse.urlencode({"after": after})
         url = f"{self._base_url}{path}?{params}"
 
-        request = urllib.request.Request(
-            url,
-            headers={
-                "Accept": "application/json",
-                "User-Agent": "nautilus-delta-options/0.1",
-            },
-        )
-
-        with urllib.request.urlopen(
-            request,
-            timeout=self._timeout_seconds,
-        ) as response:
-            return cast(object, json.load(response))
+        return public_json(url, timeout=self._timeout_seconds, stop=self._stop_event)
 
 
 def parse_option_chain_payload(

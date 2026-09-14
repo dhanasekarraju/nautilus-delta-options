@@ -54,6 +54,13 @@ def main() -> None:
             health = routes["/health"].endpoint(response)
             if response.status_code != 503 or health["real_orders_enabled"]:
                 raise RuntimeError("Uninitialized service must fail readiness and prohibit orders")
+            provenance = health["provenance"]
+            if not provenance["run_id"] or not provenance["fingerprint"]:
+                raise RuntimeError("Run identity missing")
+            from nautilus_delta_options.paper.provenance import bind_provenance
+
+            bind_provenance(root / "primary.sqlite", provenance)
+            bind_provenance(root / "research.sqlite", provenance)
             html = routes["/"].endpoint().body
             if b"<html" not in html.lower():
                 raise RuntimeError("Packaged dashboard HTML missing")
@@ -78,6 +85,7 @@ def main() -> None:
                     "unready HTTP status",
                     "packaged HTML",
                     "SQLite reconciliation",
+                    "persistent run provenance",
                 ],
                 "network_calls": 0,
                 "docker_verified": False,

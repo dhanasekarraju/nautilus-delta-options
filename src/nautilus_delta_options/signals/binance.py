@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-import json
+import math
 import time
 import urllib.parse
-import urllib.request
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from threading import Event
 from typing import Literal, cast
+
+from nautilus_delta_options.public_http import public_json
 
 type SignalUnderlying = Literal["BTC", "ETH"]
 
@@ -39,12 +41,14 @@ class BinanceFuturesPublicClient:
         *,
         base_url: str = "https://fapi.binance.com",
         timeout_seconds: float = 20.0,
+        stop_event: Event | None = None,
     ) -> None:
-        if timeout_seconds <= 0:
+        if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
 
         self._base_url = base_url.rstrip("/")
         self._timeout_seconds = timeout_seconds
+        self._stop_event = stop_event
 
     def fetch_v31_candles(
         self,
@@ -58,19 +62,8 @@ class BinanceFuturesPublicClient:
                 "limit": 201,
             }
         )
-        request = urllib.request.Request(
-            (f"{self._base_url}/fapi/v1/klines?{parameters}"),
-            headers={
-                "Accept": "application/json",
-                "User-Agent": ("nautilus-delta-options/0.1"),
-            },
-        )
-
-        with urllib.request.urlopen(
-            request,
-            timeout=self._timeout_seconds,
-        ) as response:
-            payload: object = json.load(response)
+        url = f"{self._base_url}/fapi/v1/klines?{parameters}"
+        payload = public_json(url, timeout=self._timeout_seconds, stop=self._stop_event)
 
         captured_ms = time.time_ns() // 1_000_000
         completed = parse_binance_klines(

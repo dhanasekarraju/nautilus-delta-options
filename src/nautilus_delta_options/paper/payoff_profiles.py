@@ -51,8 +51,8 @@ def initial_state(
         if market["best_bid"] is not None and market["bid_size"] is not None:
             bid, size = Decimal(market["best_bid"]), Decimal(market["bid_size"])
             spot = Decimal(market["spot_price"])
-            if bid > 0 and size >= position.contracts:
-                fill = max(ZERO, bid - penalty)
+            if bid > penalty and size >= position.contracts:
+                fill = bid - penalty
                 initial_net = (
                     fill * position.contracts * position.contract_value
                     - _fee(position, fill, spot, gst)
@@ -182,7 +182,8 @@ def observe(
     except ValueError as error:
         event["status"] = str(error)
         return state, event
-    if position.settlement_ns <= 0 or observed_ns >= position.settlement_ns:
+    if (position.settlement_ns <= 0
+            or max(observed_ns, ticker.exchange_timestamp * 1000) >= position.settlement_ns):
         event["status"] = "unresolved settlement; verified reconciliation required"
         return state, event
     if (
@@ -197,7 +198,10 @@ def observe(
     if ticker.best_ask is not None and bid > ticker.best_ask:
         event["status"] = "crossed quote"
         return state, event
-    fill = max(ZERO, bid - penalty)
+    fill = bid - penalty
+    if fill <= 0:
+        event["status"] = "deferred: execution penalty leaves no positive executable price"
+        return state, event
     fee = _fee(position, fill, ticker.spot_price, gst)
     net = fill * position.contracts * position.contract_value - fee - position.entry_debit
     event.update(
