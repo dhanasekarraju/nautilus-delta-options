@@ -2,428 +2,587 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport"
-        content="width=device-width, initial-scale=1">
-  <title>V3.4 Paper Live</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#07111f">
+  <title>Delta Options · V3.4 Paper Live</title>
   <style>
     :root {
       color-scheme: dark;
-      font-family:
-        Inter, ui-sans-serif, system-ui, sans-serif;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --bg: #06101d;
+      --bg-deep: #030914;
+      --panel: rgba(11, 24, 40, .86);
+      --panel-strong: rgba(13, 29, 48, .96);
+      --panel-soft: rgba(15, 33, 54, .72);
+      --line: rgba(129, 174, 220, .16);
+      --line-strong: rgba(83, 185, 255, .32);
+      --text: #f4f8ff;
+      --muted: #8fa9c3;
+      --muted-2: #6f89a2;
+      --cyan: #39c6ff;
+      --blue: #4a7dff;
+      --violet: #8f65ff;
+      --teal: #2dd4bf;
+      --green: #3ddc97;
+      --amber: #f6bd46;
+      --orange: #f7931a;
+      --red: #ff6482;
+      --shadow: 0 22px 60px rgba(0, 0, 0, .28);
     }
 
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
     body {
       margin: 0;
-      background: #0b0f14;
-      color: #e8eef7;
+      min-height: 100vh;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 15% -10%, rgba(57, 198, 255, .13), transparent 32%),
+        radial-gradient(circle at 88% 2%, rgba(143, 101, 255, .13), transparent 34%),
+        linear-gradient(180deg, var(--bg) 0%, var(--bg-deep) 100%);
     }
-
-    main {
-      max-width: 1320px;
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      opacity: .17;
+      background-image:
+        linear-gradient(rgba(255,255,255,.025) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,.025) 1px, transparent 1px);
+      background-size: 42px 42px;
+      mask-image: linear-gradient(to bottom, black, transparent 78%);
+    }
+    a { color: inherit; text-decoration: none; }
+    button, input, select { font: inherit; }
+    .shell {
+      width: min(1540px, calc(100% - 32px));
       margin: 0 auto;
-      padding: 24px;
+      padding: 18px 0 36px;
     }
-
-    .banner {
-      border: 1px solid #465466;
-      border-radius: 14px;
-      padding: 18px 20px;
-      background: #111821;
-      margin-bottom: 18px;
-    }
-
-    .paper {
-      font-weight: 800;
-      font-size: 13px;
-      letter-spacing: .09em;
-      text-transform: uppercase;
-    }
-
-    h1 {
-      margin: 5px 0;
-      font-size: 30px;
-    }
-
-    .muted {
-      color: #9aabba;
-    }
-
-    .grid {
-      display: grid;
-      grid-template-columns:
-        repeat(auto-fit, minmax(190px, 1fr));
-      gap: 12px;
-      margin: 14px 0;
-    }
-
-    .card {
-      border: 1px solid #293544;
-      border-radius: 12px;
-      padding: 15px;
-      background: #10161e;
-    }
-
-    .label {
-      font-size: 12px;
-      color: #8ea0b2;
-      text-transform: uppercase;
-      letter-spacing: .05em;
-    }
-
-    .value {
-      font-size: 24px;
-      font-weight: 750;
-      margin-top: 5px;
-    }
-
-    section {
-      margin-top: 24px;
-    }
-
-    section h2 {
-      margin-bottom: 10px;
-      font-size: 19px;
-    }
-
-    .signals {
-      display: grid;
-      grid-template-columns:
-        repeat(auto-fit, minmax(330px, 1fr));
-      gap: 12px;
-    }
-
-    .signal {
-      border: 1px solid #293544;
-      border-radius: 12px;
-      padding: 16px;
-      background: #10161e;
-    }
-
-    .signal-head {
+    .topbar {
       display: flex;
-      justify-content: space-between;
+      align-items: center;
+      gap: 22px;
+      min-height: 58px;
+      margin-bottom: 12px;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-width: 260px;
+    }
+    .brand-mark {
+      width: 40px;
+      height: 40px;
+      display: grid;
+      place-items: center;
+      border-radius: 13px;
+      font-size: 22px;
+      font-weight: 900;
+      color: #06101d;
+      background: linear-gradient(135deg, #6be0ff, #4083ff 58%, #7a5cff);
+      box-shadow: 0 10px 30px rgba(57, 198, 255, .24);
+      transform: rotate(-7deg);
+    }
+    .brand-copy strong { display: block; font-size: 18px; letter-spacing: .01em; }
+    .brand-copy span { display: block; margin-top: 2px; font-size: 12px; color: var(--muted); }
+    .nav { display: flex; flex-wrap: wrap; gap: 8px; margin-right: auto; }
+    .nav a {
+      padding: 9px 13px;
+      border-radius: 10px;
+      color: var(--muted);
+      font-size: 13px;
+      border: 1px solid transparent;
+      transition: .18s ease;
+    }
+    .nav a:hover, .nav a.active {
+      color: #dff6ff;
+      background: rgba(57, 198, 255, .09);
+      border-color: rgba(57, 198, 255, .18);
+    }
+    .mode-chip {
+      display: flex;
       align-items: center;
       gap: 10px;
+      padding: 9px 13px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: rgba(9, 22, 38, .7);
     }
-
-    .decision {
-      font-size: 20px;
+    .mode-dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 999px;
+      background: var(--green);
+      box-shadow: 0 0 0 5px rgba(61, 220, 151, .1), 0 0 18px rgba(61, 220, 151, .65);
+    }
+    .mode-copy strong { display: block; font-size: 13px; }
+    .mode-copy span { display: block; margin-top: 1px; font-size: 11px; color: var(--muted); }
+    .hero {
+      position: relative;
+      overflow: hidden;
+      border: 1px solid var(--line-strong);
+      border-radius: 20px;
+      padding: 22px 24px;
+      background: linear-gradient(115deg, rgba(12, 33, 56, .98), rgba(8, 18, 33, .93) 55%, rgba(17, 20, 48, .92));
+      box-shadow: var(--shadow);
+    }
+    .hero::after {
+      content: "";
+      position: absolute;
+      width: 580px;
+      height: 240px;
+      right: -50px;
+      top: -80px;
+      border-radius: 50%;
+      border: 1px solid rgba(57, 198, 255, .24);
+      box-shadow: -60px 55px 0 -59px rgba(57, 198, 255, .18), -120px 100px 0 -119px rgba(143, 101, 255, .16);
+      transform: rotate(-8deg);
+      opacity: .75;
+    }
+    .hero-inner {
+      position: relative;
+      z-index: 1;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(230px, 380px);
+      align-items: end;
+      gap: 28px;
+    }
+    .badges { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      font-size: 11px;
       font-weight: 800;
+      letter-spacing: .045em;
+      text-transform: uppercase;
+      border: 1px solid transparent;
     }
-
-    .row {
-      display: flex;
-      justify-content: space-between;
-      gap: 18px;
-      padding: 5px 0;
-      border-bottom: 1px solid #1e2935;
+    .badge.blue { color: #9ee8ff; background: rgba(42, 161, 255, .14); border-color: rgba(66, 188, 255, .3); }
+    .badge.amber { color: #ffd878; background: rgba(246, 189, 70, .12); border-color: rgba(246, 189, 70, .28); }
+    .badge.red { color: #ff9ab0; background: rgba(255, 100, 130, .12); border-color: rgba(255, 100, 130, .26); }
+    .badge.green { color: #8ff0c2; background: rgba(61, 220, 151, .11); border-color: rgba(61, 220, 151, .25); }
+    .hero h1 { margin: 0; font-size: clamp(27px, 3vw, 40px); line-height: 1.07; letter-spacing: -.035em; }
+    .hero-meta { margin-top: 10px; color: #9fc2de; font-size: 13px; }
+    .hero-note { position: relative; padding-left: 18px; color: #bad8f1; font-size: 14px; line-height: 1.55; border-left: 2px solid rgba(57, 198, 255, .42); }
+    .hero-note strong { display: block; margin-bottom: 3px; color: #edf8ff; font-size: 16px; }
+    .metrics { display: grid; grid-template-columns: repeat(6, minmax(150px, 1fr)); gap: 12px; margin-top: 14px; }
+    .metric {
+      position: relative;
+      overflow: hidden;
+      min-height: 128px;
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: linear-gradient(180deg, rgba(13, 29, 48, .94), rgba(8, 20, 34, .93));
+      box-shadow: 0 12px 30px rgba(0,0,0,.14);
     }
-
-    .row:last-child {
-      border-bottom: 0;
+    .metric::after {
+      content: "";
+      position: absolute;
+      width: 90px;
+      height: 90px;
+      right: -34px;
+      top: -30px;
+      border-radius: 50%;
+      background: var(--glow, rgba(57, 198, 255, .12));
+      filter: blur(3px);
     }
-
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 13px;
+    .metric-head { display: flex; align-items: center; gap: 9px; position: relative; z-index: 1; }
+    .metric-icon {
+      width: 34px;
+      height: 34px;
+      display: grid;
+      place-items: center;
+      border-radius: 10px;
+      font-size: 17px;
+      font-weight: 900;
+      color: var(--accent, var(--cyan));
+      background: color-mix(in srgb, var(--accent, var(--cyan)) 13%, transparent);
+      border: 1px solid color-mix(in srgb, var(--accent, var(--cyan)) 25%, transparent);
     }
-
-    th, td {
-      border-bottom: 1px solid #253140;
-      padding: 9px 8px;
-      text-align: left;
-      white-space: nowrap;
+    .metric-label { color: var(--muted); font-size: 10px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
+    .metric-value { position: relative; z-index: 1; margin-top: 13px; font-size: clamp(21px, 2vw, 28px); font-weight: 850; letter-spacing: -.035em; }
+    .metric-sub { position: relative; z-index: 1; margin-top: 5px; color: var(--muted); font-size: 11px; }
+    .metric-value.positive { color: #7ff3bd; }
+    .metric-value.negative { color: #ff8ca3; }
+    .progress-track, .score-track { overflow: hidden; height: 7px; border-radius: 999px; background: rgba(126, 164, 198, .13); }
+    .progress-track { position: relative; z-index: 1; margin-top: 11px; }
+    .progress-fill, .score-fill { width: 0; height: 100%; border-radius: inherit; transition: width .35s ease; }
+    .progress-fill { background: linear-gradient(90deg, #38c7ff, #6d7dff); box-shadow: 0 0 16px rgba(57, 198, 255, .36); }
+    .section { margin-top: 22px; }
+    .section-heading { display: flex; align-items: center; gap: 10px; margin: 0 0 11px; }
+    .section-kicker { width: 4px; height: 19px; border-radius: 99px; background: linear-gradient(#37d1ff, #7764ff); box-shadow: 0 0 14px rgba(57, 198, 255, .35); }
+    .section-heading h2 { margin: 0; font-size: 18px; letter-spacing: -.015em; }
+    .section-status { margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; color: var(--muted); font-size: 11px; }
+    .mini-chip { display: inline-flex; align-items: center; gap: 6px; padding: 5px 8px; border-radius: 999px; border: 1px solid var(--line); background: rgba(13, 29, 48, .8); }
+    .mini-chip.live { color: #91efc2; border-color: rgba(61, 220, 151, .22); background: rgba(61, 220, 151, .08); }
+    .signals { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+    .signal {
+      position: relative;
+      overflow: hidden;
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: linear-gradient(150deg, rgba(14, 31, 51, .97), rgba(7, 19, 34, .95));
+      box-shadow: 0 15px 36px rgba(0,0,0,.18);
     }
-
-    th {
-      color: #91a4b7;
-      font-weight: 600;
+    .signal.btc { --asset: #f7931a; }
+    .signal.eth { --asset: #7b7cff; }
+    .signal::before {
+      content: "";
+      position: absolute;
+      width: 230px;
+      height: 230px;
+      top: -150px;
+      right: 10%;
+      border-radius: 50%;
+      background: color-mix(in srgb, var(--asset, var(--cyan)) 13%, transparent);
+      filter: blur(12px);
+      pointer-events: none;
     }
-
-    .table-wrap {
-      overflow-x: auto;
-      border: 1px solid #293544;
-      border-radius: 12px;
-      background: #10161e;
+    .signal-top { position: relative; display: flex; align-items: center; gap: 12px; z-index: 1; }
+    .asset-mark {
+      width: 43px;
+      height: 43px;
+      display: grid;
+      place-items: center;
+      flex: 0 0 auto;
+      border-radius: 50%;
+      color: white;
+      font-size: 18px;
+      font-weight: 900;
+      background: color-mix(in srgb, var(--asset, var(--cyan)) 82%, #19253a);
+      box-shadow: 0 8px 24px color-mix(in srgb, var(--asset, var(--cyan)) 20%, transparent);
     }
-
-    .error {
-      white-space: pre-wrap;
-      border: 1px solid #633;
-      border-radius: 12px;
-      padding: 12px;
-      margin-top: 12px;
+    .asset-copy strong { display: block; font-size: 19px; }
+    .asset-copy span { display: block; margin-top: 2px; color: var(--muted); font-size: 11px; }
+    .decision {
+      margin-left: auto;
+      min-width: 102px;
+      padding: 7px 14px;
+      text-align: center;
+      border-radius: 999px;
+      font-size: 16px;
+      font-weight: 900;
+      letter-spacing: .04em;
+      border: 1px solid rgba(57, 198, 255, .45);
+      color: #d8f5ff;
+      background: rgba(57, 198, 255, .08);
+      box-shadow: inset 0 0 22px rgba(57, 198, 255, .04);
+    }
+    .decision.call { color: #8ff0c2; border-color: rgba(61, 220, 151, .42); background: rgba(61, 220, 151, .09); }
+    .decision.put { color: #ff9daf; border-color: rgba(255, 100, 130, .42); background: rgba(255, 100, 130, .09); }
+    .signal-grid { position: relative; z-index: 1; display: grid; grid-template-columns: minmax(0, 1fr) 220px; gap: 16px; margin-top: 16px; }
+    .score-card { padding: 13px; border: 1px solid rgba(122, 163, 202, .14); border-radius: 13px; background: rgba(3, 12, 23, .28); }
+    .score-pair { display: grid; grid-template-columns: 1fr auto; gap: 7px 10px; align-items: center; margin-bottom: 11px; }
+    .score-pair:last-child { margin-bottom: 0; }
+    .score-name { color: var(--muted); font-size: 11px; }
+    .score-number { font-size: 12px; font-weight: 800; }
+    .score-track { grid-column: 1 / -1; height: 6px; }
+    .score-fill.call { background: linear-gradient(90deg, #35c6ff, #2dd4bf); }
+    .score-fill.put { background: linear-gradient(90deg, #8f65ff, #ff6482); }
+    .signal-stats { margin-top: 13px; border-top: 1px solid rgba(122, 163, 202, .13); }
+    .stat-row { display: grid; grid-template-columns: minmax(120px, 1fr) minmax(0, auto); gap: 16px; align-items: center; min-height: 35px; border-bottom: 1px solid rgba(122, 163, 202, .11); font-size: 12px; }
+    .stat-row span:first-child { color: #a8bfd3; }
+    .stat-row strong { text-align: right; overflow-wrap: anywhere; }
+    .signal-side { display: flex; flex-direction: column; gap: 10px; }
+    .edge-card { padding: 13px; border: 1px solid rgba(57, 198, 255, .19); border-radius: 13px; background: rgba(8, 23, 39, .72); }
+    .edge-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 9px; color: var(--muted); font-size: 11px; }
+    .edge-head strong { color: #dff7ff; font-size: 12px; }
+    .edge-fill { height: 100%; border-radius: inherit; background: linear-gradient(90deg, #3cc9ff, #816eff); box-shadow: 0 0 14px rgba(57, 198, 255, .3); transition: width .35s ease; }
+    .pill-list { display: grid; gap: 7px; }
+    .pill-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 11px; }
+    .state-pill { padding: 4px 8px; border-radius: 999px; color: #b9d0e3; background: rgba(130, 156, 190, .12); border: 1px solid rgba(130, 156, 190, .12); font-weight: 700; }
+    .state-pill.good { color: #91efc2; background: rgba(61, 220, 151, .09); border-color: rgba(61, 220, 151, .18); }
+    .state-pill.warn { color: #ffd477; background: rgba(246, 189, 70, .09); border-color: rgba(246, 189, 70, .2); }
+    .state-pill.bad { color: #ff9ab0; background: rgba(255, 100, 130, .09); border-color: rgba(255, 100, 130, .18); }
+    .reasons { position: relative; z-index: 1; display: flex; flex-wrap: wrap; gap: 7px; margin-top: 14px; }
+    .reason { padding: 6px 9px; border-radius: 999px; font-size: 10px; color: #b5cae0; background: rgba(125, 157, 193, .09); border: 1px solid rgba(125, 157, 193, .15); }
+    .reason::before { content: "•"; margin-right: 6px; color: var(--amber); }
+    .panel { overflow: hidden; border: 1px solid var(--line); border-radius: 16px; background: linear-gradient(180deg, rgba(12, 28, 47, .95), rgba(7, 18, 31, .93)); }
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    th, td { padding: 11px 12px; text-align: left; border-bottom: 1px solid rgba(126, 164, 198, .12); white-space: nowrap; }
+    th { color: #8fb0cc; font-size: 10px; font-weight: 800; letter-spacing: .05em; text-transform: uppercase; background: rgba(13, 31, 52, .62); }
+    tbody tr:last-child td { border-bottom: 0; }
+    tbody tr:not(.empty-row):hover { background: rgba(57, 198, 255, .035); }
+    .empty-row td { padding: 24px 14px; text-align: center; white-space: normal; }
+    .empty-title { color: #dceafa; font-weight: 800; }
+    .empty-sub { margin-top: 4px; color: var(--muted); font-size: 11px; }
+    .pnl-positive { color: #77ecb5; font-weight: 800; }
+    .pnl-negative { color: #ff8fa6; font-weight: 800; }
+    .identity-grid { display: grid; grid-template-columns: repeat(6, minmax(150px, 1fr)); gap: 10px; }
+    .identity-card { min-height: 90px; padding: 13px; border: 1px solid var(--line); border-radius: 13px; background: rgba(11, 26, 44, .82); }
+    .identity-label { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .05em; }
+    .identity-value { margin-top: 7px; font-size: 13px; font-weight: 800; overflow-wrap: anywhere; }
+    .identity-sub { margin-top: 5px; color: var(--muted-2); font-size: 10px; line-height: 1.4; }
+    details.tech { margin-top: 10px; border: 1px solid var(--line); border-radius: 13px; background: rgba(7, 18, 31, .72); }
+    details.tech summary { cursor: pointer; padding: 12px 14px; color: var(--muted); font-size: 11px; user-select: none; }
+    details.tech pre { margin: 0; padding: 0 14px 14px; color: #9fc3de; font-size: 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .error { margin: 14px 0 0; padding: 11px 13px; border-radius: 12px; color: #ffd1d9; background: rgba(255, 100, 130, .09); border: 1px solid rgba(255, 100, 130, .22); white-space: pre-wrap; font-size: 12px; }
+    .footer { margin-top: 22px; padding: 14px 2px 2px; color: var(--muted-2); text-align: center; font-size: 11px; }
+    @media (max-width: 1180px) {
+      .metrics { grid-template-columns: repeat(3, 1fr); }
+      .identity-grid { grid-template-columns: repeat(3, 1fr); }
+      .signal-grid { grid-template-columns: 1fr; }
+      .signal-side { display: grid; grid-template-columns: 1fr 1fr; }
+    }
+    @media (max-width: 820px) {
+      .shell { width: min(100% - 18px, 1540px); padding-top: 10px; }
+      .topbar { align-items: flex-start; flex-wrap: wrap; }
+      .brand { min-width: 0; margin-right: auto; }
+      .nav { order: 3; width: 100%; overflow-x: auto; flex-wrap: nowrap; }
+      .nav a { white-space: nowrap; }
+      .hero-inner { grid-template-columns: 1fr; }
+      .hero-note { display: none; }
+      .signals { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 620px) {
+      .metrics { grid-template-columns: repeat(2, 1fr); }
+      .identity-grid { grid-template-columns: repeat(2, 1fr); }
+      .hero { padding: 18px; border-radius: 16px; }
+      .metric { min-height: 118px; }
+      .signal { padding: 14px; }
+      .signal-side { display: flex; }
+      .section-heading { align-items: flex-start; flex-wrap: wrap; }
+      .section-status { width: 100%; margin-left: 14px; }
+    }
+    @media (max-width: 420px) {
+      .metrics { grid-template-columns: 1fr; }
+      .identity-grid { grid-template-columns: 1fr; }
+      .mode-chip { display: none; }
     }
   </style>
 </head>
 <body>
-<main>
-  <div class="banner">
-    <div class="paper" id="authority">
-      PAPER ONLY · REAL ORDERS DISABLED · ENTRIES CHECKING…
-    </div>
-    <h1>Delta Options · V3.4 Paper Live</h1>
-    <div class="muted" id="updated">
-      Loading…
-    </div>
-  </div>
-
-  <div class="grid">
-    <div class="card">
-      <div class="label">20-trade progress</div>
-      <div class="value" id="progress">—</div>
-    </div>
-
-    <div class="card">
-      <div class="label">Available cash</div>
-      <div class="value" id="cash">—</div>
-    </div>
-
-    <div class="card">
-      <div class="label">Realized P&amp;L</div>
-      <div class="value" id="pnl">—</div>
-    </div>
-
-    <div class="card">
-      <div class="label">Win rate</div>
-      <div class="value" id="wr">—</div>
-    </div>
-
-    <div class="card">
-      <div class="label">Profit factor</div>
-      <div class="value" id="pf">—</div>
-    </div>
-
-    <div class="card">
-      <div class="label">Open positions</div>
-      <div class="value" id="open-count">—</div>
-    </div>
-  </div>
-
-  <div id="error"></div>
-
-  <section>
-    <h2>Latest real Delta V3.4 signals</h2>
-    <div class="signals" id="signals">
-      <div class="muted">
-        Waiting for first V3.4 evaluation.
+  <main class="shell">
+    <header class="topbar">
+      <a class="brand" href="#top" aria-label="Delta Options dashboard">
+        <span class="brand-mark">Δ</span>
+        <span class="brand-copy"><strong>Delta Options</strong><span>Systematic options validation</span></span>
+      </a>
+      <nav class="nav" aria-label="Dashboard sections">
+        <a class="active" href="#top">Dashboard</a>
+        <a href="#signals">Signals</a>
+        <a href="#positions">Positions</a>
+        <a href="#trades">Trades</a>
+        <a href="#identity">Run identity</a>
+      </nav>
+      <div class="mode-chip" aria-label="Current mode">
+        <span class="mode-dot"></span>
+        <span class="mode-copy"><strong>Paper Live</strong><span>Validation mode</span></span>
       </div>
-    </div>
-  </section>
+    </header>
 
-  <section>
-    <h2>Open paper positions</h2>
-    <div class="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>ID</th>
-            <th>Asset</th>
-            <th>Side</th>
-            <th>Contract</th>
-            <th>Contracts</th>
-            <th>Entry</th>
-            <th>SL</th>
-            <th>TP</th>
-            <th>RR</th>
-          </tr>
-        </thead>
-        <tbody id="open"></tbody>
-      </table>
-    </div>
-  </section>
-
-  <section>
-    <h2>Closed V3.4 paper trades</h2>
-    <div class="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>ID</th>
-            <th>Asset</th>
-            <th>Side</th>
-            <th>Contract</th>
-            <th>Entry</th>
-            <th>Exit</th>
-            <th>Net P&amp;L</th>
-            <th>Reason</th>
-          </tr>
-        </thead>
-        <tbody id="closed"></tbody>
-      </table>
-    </div>
-  </section>
-<section><h2>Validation run identity</h2><pre id="provenance" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre></section>
-</main>
-
-<script>
-const esc = (v) => String(v ?? "")
-  .replaceAll("&", "&amp;")
-  .replaceAll("<", "&lt;")
-  .replaceAll(">", "&gt;")
-  .replaceAll('"', "&quot;")
-  .replaceAll("'", "&#039;");
-
-const num = (v, d = 2) => {
-  if (v === null || v === undefined || v === "") return "—";
-  const n = Number(v);
-  return Number.isFinite(n) ? n.toFixed(d) : String(v);
-};
-
-function renderSignal(s) {
-  const u = s.underlying_state || {};
-  const f = s.flow_state || {};
-  const q = s.contract_quality || {};
-  const side = s.decision === "CALL"
-    ? q.best_call
-    : s.decision === "PUT"
-      ? q.best_put
-      : null;
-  const pe = s.paper_entry || {};
-
-  return `
-    <article class="signal">
-      <div class="signal-head">
-        <strong>${esc(s.underlying)}</strong>
-        <span class="decision">${esc(s.decision)}</span>
+    <section class="hero" id="top">
+      <div class="hero-inner">
+        <div>
+          <div class="badges">
+            <span class="badge blue">Paper only</span>
+            <span class="badge amber">Real orders disabled</span>
+            <span class="badge red" id="entry-badge">Paper entries checking…</span>
+          </div>
+          <h1>Delta Options · V3.4 Paper Live</h1>
+          <div class="hero-meta" id="updated">Waiting for live dashboard data…</div>
+        </div>
+        <div class="hero-note">
+          <strong>Observe. Validate. Build confidence from evidence.</strong>
+          A WAIT is the system protecting the sample until the full setup is ready.
+        </div>
       </div>
-      <div class="row">
-        <span>CALL / PUT</span>
-        <strong>${num(s.call_score, 0)} / ${num(s.put_score, 0)}</strong>
+    </section>
+
+    <section class="metrics" aria-label="Validation summary">
+      <article class="metric" style="--accent: var(--cyan); --glow: rgba(57,198,255,.14)">
+        <div class="metric-head"><div class="metric-icon">◎</div><div class="metric-label">20-trade progress</div></div>
+        <div class="metric-value" id="progress">—</div>
+        <div class="progress-track"><div class="progress-fill" id="progress-fill"></div></div>
+        <div class="metric-sub" id="progress-sub">Prospective paper sample</div>
+      </article>
+      <article class="metric" style="--accent: var(--teal); --glow: rgba(45,212,191,.13)">
+        <div class="metric-head"><div class="metric-icon">◫</div><div class="metric-label">Available cash</div></div>
+        <div class="metric-value" id="cash">—</div><div class="metric-sub">Paper trading balance</div>
+      </article>
+      <article class="metric" style="--accent: var(--violet); --glow: rgba(143,101,255,.14)">
+        <div class="metric-head"><div class="metric-icon">▥</div><div class="metric-label">Realized P&amp;L</div></div>
+        <div class="metric-value" id="pnl">—</div><div class="metric-sub">Closed-trade net result</div>
+      </article>
+      <article class="metric" style="--accent: var(--blue); --glow: rgba(74,125,255,.14)">
+        <div class="metric-head"><div class="metric-icon">◇</div><div class="metric-label">Win rate</div></div>
+        <div class="metric-value" id="wr">—</div><div class="metric-sub" id="wr-sub">No closed trades yet</div>
+      </article>
+      <article class="metric" style="--accent: var(--violet); --glow: rgba(143,101,255,.14)">
+        <div class="metric-head"><div class="metric-icon">↗</div><div class="metric-label">Profit factor</div></div>
+        <div class="metric-value" id="pf">—</div><div class="metric-sub" id="pf-sub">No closed trades yet</div>
+      </article>
+      <article class="metric" style="--accent: var(--amber); --glow: rgba(246,189,70,.13)">
+        <div class="metric-head"><div class="metric-icon">▤</div><div class="metric-label">Open positions</div></div>
+        <div class="metric-value" id="open-count">—</div><div class="metric-sub" id="open-sub">No active paper positions</div>
+      </article>
+    </section>
+
+    <div id="error"></div>
+
+    <section class="section" id="signals">
+      <div class="section-heading">
+        <span class="section-kicker"></span><h2>Latest real Delta V3.4 signals</h2>
+        <div class="section-status">
+          <span class="mini-chip live"><span class="mode-dot"></span>Live observation</span>
+          <span class="mini-chip">Paper mode</span><span class="mini-chip">No real orders</span>
+        </div>
       </div>
-      <div class="row">
-        <span>ADX</span>
-        <strong>${num(u.adx)}</strong>
+      <div class="signals" id="signal-list"><div class="panel" style="padding:24px;color:var(--muted)">Waiting for the first completed V3.4 evaluation…</div></div>
+    </section>
+
+    <section class="section" id="positions">
+      <div class="section-heading"><span class="section-kicker"></span><h2>Open paper positions</h2><div class="section-status"><span class="mini-chip" id="positions-chip">0 open positions</span></div></div>
+      <div class="panel table-wrap"><table><thead><tr><th>ID</th><th>Asset</th><th>Side</th><th>Contract</th><th>Contracts</th><th>Entry</th><th>SL</th><th>TP</th><th>RR</th></tr></thead><tbody id="open"></tbody></table></div>
+    </section>
+
+    <section class="section" id="trades">
+      <div class="section-heading"><span class="section-kicker"></span><h2>Closed V3.4 paper trades</h2><div class="section-status"><span class="mini-chip" id="trades-chip">0 trades</span></div></div>
+      <div class="panel table-wrap"><table><thead><tr><th>ID</th><th>Asset</th><th>Side</th><th>Contract</th><th>Entry</th><th>Exit</th><th>Net P&amp;L</th><th>Reason</th></tr></thead><tbody id="closed"></tbody></table></div>
+    </section>
+
+    <section class="section" id="identity">
+      <div class="section-heading"><span class="section-kicker"></span><h2>Validation run identity</h2></div>
+      <div class="identity-grid">
+        <article class="identity-card"><div class="identity-label">Build ID</div><div class="identity-value" id="build-id">—</div><div class="identity-sub">Exact paper-validation build</div></article>
+        <article class="identity-card"><div class="identity-label">Run profile</div><div class="identity-value" id="run-profile">—</div><div class="identity-sub">Payoff profile bound to this cohort</div></article>
+        <article class="identity-card"><div class="identity-label">Execution authority</div><div class="identity-value" style="color:#8ff0c2">Paper only</div><div class="identity-sub">Real orders are disabled</div></article>
+        <article class="identity-card"><div class="identity-label">Paper entries</div><div class="identity-value" id="entry-state">—</div><div class="identity-sub" id="entry-state-sub">Validation admission state</div></article>
+        <article class="identity-card"><div class="identity-label">Runtime</div><div class="identity-value" id="runtime">—</div><div class="identity-sub">Containerized application runtime</div></article>
+        <article class="identity-card"><div class="identity-label">Run ID</div><div class="identity-value" id="run-id">—</div><div class="identity-sub">Persistent run provenance</div></article>
       </div>
-      <div class="row">
-        <span>15m / 30m</span>
-        <strong>${num(u.return_15m, 5)} / ${num(u.return_30m, 5)}</strong>
-      </div>
-      <div class="row">
-        <span>Flow confirms C / P</span>
-        <strong>${f.call_confirmations ?? "—"} / ${f.put_confirmations ?? "—"}</strong>
-      </div>
-      <div class="row">
-        <span>Selected contract</span>
-        <strong>${side ? esc(side.symbol) : "—"}</strong>
-      </div>
-      <div class="row">
-        <span>Quality</span>
-        <strong>${side ? num(side.score) : "—"}</strong>
-      </div>
-      <div class="row">
-        <span>Paper entry</span>
-        <strong>${esc(pe.status || "—")}</strong>
-      </div>
-      <div class="muted" style="margin-top:8px">
-        ${esc((s.reasons || []).join(", "))}
-      </div>
-    </article>
-  `;
-}
+      <details class="tech"><summary>Technical provenance</summary><pre id="provenance">Waiting for provenance…</pre></details>
+    </section>
 
-function renderRows(rows, open) {
-  if (!rows.length) {
-    return `<tr><td colspan="9" class="muted">None</td></tr>`;
-  }
+    <div class="footer">Paper validation is evidence collection, not a profitability promise. The dashboard reports the strategy state without changing it.</div>
+  </main>
 
-  if (open) {
-    return rows.map(p => `
-      <tr>
-        <td>${esc(p.trade_id)}</td>
-        <td>${esc(p.underlying)}</td>
-        <td>${esc(p.contract_type)}</td>
-        <td>${esc(p.symbol)}</td>
-        <td>${esc(p.contracts)}</td>
-        <td>${num(p.entry_price)}</td>
-        <td>${num(p.stop_price)}</td>
-        <td>${num(p.target_price)}</td>
-        <td>${num(p.reward_risk)}</td>
-      </tr>
-    `).join("");
-  }
+  <script>
+    const esc = (v) => String(v ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#039;");
+    const finite = (v) => { const n = Number(v); return Number.isFinite(n) ? n : null; };
+    const num = (v, d = 2) => { const n = finite(v); return n === null ? "—" : n.toFixed(d); };
+    const pct = (v) => { const n = finite(v); return n === null ? 0 : Math.max(0, Math.min(100, n)); };
+    const shortId = (v, size = 10) => { const s = String(v ?? ""); return s ? (s.length > size ? `${s.slice(0, size)}…` : s) : "—"; };
+    const friendlyTime = (v) => { if (!v) return "waiting for first completed evaluation"; const date = new Date(v); if (Number.isNaN(date.getTime())) return String(v); return `${date.toLocaleString()} · ${v}`; };
+    const reasonLabels = {
+      previous_chain_age_outside_window: "Waiting for fresh comparison chain",
+      flow_confirmation_required: "Flow confirmation pending",
+      weak_trend_regime: "Trend strength below gate",
+      score_or_confirmation_gate_not_met: "Score / confirmation gate not met",
+      directional_extension_too_large: "Move extended vs ATR",
+      insufficient_common_contracts: "More comparable contracts needed",
+      trend_alignment_required: "Trend alignment pending",
+      no_directional_edge: "Directional edge not established"
+    };
+    const reasonLabel = (r) => reasonLabels[r] || String(r || "Waiting for setup").replaceAll("_", " ").replace(/\b\w/g, (m) => m.toUpperCase());
+    const statePill = (text, tone = "") => `<span class="state-pill ${tone}">${esc(text)}</span>`;
 
-  return rows.map(t => `
-    <tr>
-      <td>${esc(t.trade_id)}</td>
-      <td>${esc(t.underlying)}</td>
-      <td>${esc(t.contract_type)}</td>
-      <td>${esc(t.symbol)}</td>
-      <td>${num(t.entry_price)}</td>
-      <td>${num(t.exit_price)}</td>
-      <td>${num(t.net_pnl)}</td>
-      <td>${esc(t.reason)}</td>
-    </tr>
-  `).join("");
-}
+    function derivedStates(s) {
+      const u = s.underlying_state || {}; const f = s.flow_state || null;
+      const r15 = finite(u.return_15m); const r30 = finite(u.return_30m); const adx = finite(u.adx);
+      let trend = ["Mixed", ""];
+      if (r15 !== null && r30 !== null) { if (r15 > 0 && r30 > 0) trend = ["Up", "good"]; else if (r15 < 0 && r30 < 0) trend = ["Down", "bad"]; }
+      let momentum = ["Watching", ""]; if (adx !== null) momentum = adx >= 18 ? ["Gate met", "good"] : ["Below gate", "warn"];
+      let flow = ["Pending", "warn"];
+      if (f) { const cc = finite(f.call_confirmations) ?? 0; const pc = finite(f.put_confirmations) ?? 0; flow = [`C ${cc} / P ${pc}`, Math.max(cc, pc) >= 2 ? "good" : "warn"]; }
+      const decision = String(s.decision || "WAIT").toUpperCase(); const setup = decision === "WAIT" ? ["Waiting", ""] : [decision, "good"];
+      return { trend, momentum, flow, setup };
+    }
+    function selectedContract(s) { const q = s.contract_quality || {}; const decision = String(s.decision || "WAIT").toUpperCase(); if (decision === "CALL" && q.best_call) return q.best_call; if (decision === "PUT" && q.best_put) return q.best_put; return null; }
 
-async function refresh() {
-  try {
-    const r = await fetch(
-      "./api/dashboard",
-      { cache: "no-store" }
-    );
+    function renderSignal(s) {
+      const u = s.underlying_state || {}; const f = s.flow_state || null; const q = s.contract_quality || {}; const contract = selectedContract(s); const pe = s.paper_entry || {};
+      const decision = String(s.decision || "WAIT").toUpperCase(); const callScore = pct(s.call_score); const putScore = pct(s.put_score); const edge = pct(s.score_edge ?? s.confidence); const states = derivedStates(s);
+      const asset = String(s.underlying || "—").toUpperCase(); const assetClass = asset === "BTC" ? "btc" : asset === "ETH" ? "eth" : ""; const assetName = asset === "BTC" ? "Bitcoin" : asset === "ETH" ? "Ethereum" : "Underlying"; const assetMark = asset === "BTC" ? "₿" : asset === "ETH" ? "◆" : asset.slice(0, 1);
+      const decisionClass = decision === "CALL" ? "call" : decision === "PUT" ? "put" : ""; const reasons = (s.reasons || []).length ? s.reasons : ["setup_monitoring"];
+      const flowConf = f ? `${f.call_confirmations ?? "—"} / ${f.put_confirmations ?? "—"}` : "— / —";
+      return `<article class="signal ${assetClass}">
+        <div class="signal-top"><div class="asset-mark">${esc(assetMark)}</div><div class="asset-copy"><strong>${esc(asset)}</strong><span>${esc(assetName)}</span></div><div class="decision ${decisionClass}">${esc(decision)}</div></div>
+        <div class="signal-grid"><div>
+          <div class="score-card">
+            <div class="score-pair"><span class="score-name">CALL score</span><span class="score-number">${num(s.call_score, 0)}</span><div class="score-track"><div class="score-fill call" style="width:${callScore}%"></div></div></div>
+            <div class="score-pair"><span class="score-name">PUT score</span><span class="score-number">${num(s.put_score, 0)}</span><div class="score-track"><div class="score-fill put" style="width:${putScore}%"></div></div></div>
+          </div>
+          <div class="signal-stats">
+            <div class="stat-row"><span>ADX</span><strong>${num(u.adx)}</strong></div>
+            <div class="stat-row"><span>15m / 30m</span><strong>${num(u.return_15m, 5)} / ${num(u.return_30m, 5)}</strong></div>
+            <div class="stat-row"><span>Flow confirms C / P</span><strong>${esc(flowConf)}</strong></div>
+            <div class="stat-row"><span>Selected contract</span><strong>${contract ? esc(contract.symbol) : "—"}</strong></div>
+            <div class="stat-row"><span>Quality</span><strong>${contract ? num(contract.score) : "—"}</strong></div>
+            <div class="stat-row"><span>Paper entry</span><strong>${esc(pe.status || "—")}</strong></div>
+          </div></div>
+          <aside class="signal-side">
+            <div class="edge-card"><div class="edge-head"><span>Signal score edge</span><strong>${num(s.score_edge ?? s.confidence, 0)}</strong></div><div class="score-track"><div class="edge-fill" style="width:${edge}%"></div></div></div>
+            <div class="edge-card"><div class="pill-list">
+              <div class="pill-row"><span>Trend</span>${statePill(states.trend[0], states.trend[1])}</div>
+              <div class="pill-row"><span>Momentum</span>${statePill(states.momentum[0], states.momentum[1])}</div>
+              <div class="pill-row"><span>Flow</span>${statePill(states.flow[0], states.flow[1])}</div>
+              <div class="pill-row"><span>Setup</span>${statePill(states.setup[0], states.setup[1])}</div>
+            </div></div>
+            <div class="edge-card"><div class="edge-head"><span>Candidate quality</span><strong>${q ? "Live" : "—"}</strong></div><div class="pill-list"><div class="pill-row"><span>Calls</span><strong>${q.call_candidate_count ?? "—"}</strong></div><div class="pill-row"><span>Puts</span><strong>${q.put_candidate_count ?? "—"}</strong></div></div></div>
+          </aside>
+        </div>
+        <div class="reasons">${reasons.map((r) => `<span class="reason">${esc(reasonLabel(r))}</span>`).join("")}</div>
+      </article>`;
+    }
 
-    const d = await r.json();
+    function renderOpen(rows) {
+      if (!rows.length) return `<tr class="empty-row"><td colspan="9"><div class="empty-title">No open paper positions</div><div class="empty-sub">The portfolio is flat. The system is waiting for a setup that clears every admission gate.</div></td></tr>`;
+      return rows.map((p) => `<tr><td>${esc(p.trade_id)}</td><td>${esc(p.underlying)}</td><td>${esc(p.contract_type)}</td><td>${esc(p.symbol)}</td><td>${esc(p.contracts)}</td><td>${num(p.entry_price)}</td><td>${num(p.stop_price)}</td><td>${num(p.target_price)}</td><td>${num(p.reward_risk)}</td></tr>`).join("");
+    }
 
-    document.getElementById("provenance").textContent = JSON.stringify(d.provenance || {}, null, 2);
-    const s = d.sample || {};
-    const w = d.wallet || {};
-    const p = d.performance || {};
+    function renderClosed(rows) {
+      if (!rows.length) return `<tr class="empty-row"><td colspan="8"><div class="empty-title">No closed paper trades yet</div><div class="empty-sub">Results will appear here after paper entries are enabled, admitted, and eventually closed.</div></td></tr>`;
+      return rows.map((t) => { const pnl = finite(t.net_pnl); const pnlClass = pnl === null || pnl === 0 ? "" : pnl > 0 ? "pnl-positive" : "pnl-negative"; return `<tr><td>${esc(t.trade_id)}</td><td>${esc(t.underlying)}</td><td>${esc(t.contract_type)}</td><td>${esc(t.symbol)}</td><td>${num(t.entry_price)}</td><td>${num(t.exit_price)}</td><td class="${pnlClass}">${num(t.net_pnl)} USDT</td><td>${esc(t.reason)}</td></tr>`; }).join("");
+    }
 
-    document.getElementById("updated").textContent =
-      `${d.mode || "V3.4"} · updated ${d.updated_at || "waiting"}`;
+    function renderIdentity(d) {
+      const p = d.provenance || {}; const identity = p.identity || {}; const cfg = identity.config || {}; const build = identity.build_id || "—"; const profile = cfg.payoff_profile || "—"; const runId = p.run_id || "—";
+      const buildEl = document.getElementById("build-id"); buildEl.textContent = shortId(build, 12); buildEl.title = String(build);
+      document.getElementById("run-profile").textContent = profile;
+      document.getElementById("runtime").textContent = d.application_runtime || "—";
+      const runEl = document.getElementById("run-id"); runEl.textContent = shortId(runId, 12); runEl.title = String(runId);
+      const entry = Boolean(d.paper_entries_enabled); const entryState = document.getElementById("entry-state"); entryState.textContent = entry ? "Enabled" : "Disabled"; entryState.style.color = entry ? "#8ff0c2" : "#ff9ab0";
+      document.getElementById("entry-state-sub").textContent = entry ? "Prospective paper admission active" : "Signal observation only";
+      document.getElementById("provenance").textContent = JSON.stringify(p, null, 2);
+    }
 
-    document.getElementById("authority").textContent =
-      d.paper_entries_enabled
-        ? "PAPER ONLY · REAL ORDERS DISABLED · PAPER ENTRIES ENABLED"
-        : "PAPER ONLY · REAL ORDERS DISABLED · PAPER ENTRIES DISABLED";
+    function renderSummary(d) {
+      const s = d.sample || {}; const w = d.wallet || {}; const p = d.performance || {}; const closed = Number(s.closed || 0); const target = Number(s.target || 20); const progress = target > 0 ? Math.min(100, closed / target * 100) : 0;
+      document.getElementById("progress").textContent = `${closed} / ${target}`; document.getElementById("progress-fill").style.width = `${progress}%`;
+      document.getElementById("progress-sub").textContent = `${Math.round(progress)}% complete · ${s.remaining_to_reserve ?? Math.max(0, target - closed)} slots available`;
+      document.getElementById("cash").textContent = `${num(w.available_cash)} USDT`;
+      const pnlValue = finite(p.net_pnl); const pnlEl = document.getElementById("pnl"); pnlEl.textContent = `${num(p.net_pnl)} USDT`; pnlEl.classList.toggle("positive", pnlValue !== null && pnlValue > 0); pnlEl.classList.toggle("negative", pnlValue !== null && pnlValue < 0);
+      const wr = finite(p.win_rate); document.getElementById("wr").textContent = wr === null ? "—" : `${wr.toFixed(1)}%`; document.getElementById("wr-sub").textContent = closed ? `${p.wins ?? 0} wins · ${p.losses ?? 0} losses` : "No closed trades yet";
+      document.getElementById("pf").textContent = p.profit_factor ?? "—"; document.getElementById("pf-sub").textContent = closed ? "Gross wins / gross losses" : "No closed trades yet";
+      const open = Number(s.open || 0); document.getElementById("open-count").textContent = String(open); document.getElementById("open-sub").textContent = open ? `${open} active paper position${open === 1 ? "" : "s"}` : "No active paper positions";
+      document.getElementById("positions-chip").textContent = `${open} open position${open === 1 ? "" : "s"}`; document.getElementById("trades-chip").textContent = `${closed} closed trade${closed === 1 ? "" : "s"}`;
+      const entry = Boolean(d.paper_entries_enabled); const entryBadge = document.getElementById("entry-badge"); entryBadge.textContent = entry ? "Paper entries enabled" : "Paper entries disabled"; entryBadge.className = `badge ${entry ? "green" : "red"}`;
+      document.getElementById("updated").textContent = `${d.mode || "V3.4 PAPER-LIVE"} · updated ${friendlyTime(d.updated_at)}`;
+    }
 
-    document.getElementById("progress").textContent =
-      `${s.closed ?? 0} / ${s.target ?? 20}`;
-
-    document.getElementById("cash").textContent =
-      `${num(w.available_cash)} USDT`;
-
-    document.getElementById("pnl").textContent =
-      `${num(p.net_pnl)} USDT`;
-
-    document.getElementById("wr").textContent =
-      p.win_rate === null || p.win_rate === undefined
-        ? "—"
-        : `${num(p.win_rate)}%`;
-
-    document.getElementById("pf").textContent =
-      p.profit_factor ?? "—";
-
-    document.getElementById("open-count").textContent =
-      s.open ?? 0;
-
-    document.getElementById("signals").innerHTML =
-      (d.signals || []).length
-        ? d.signals.map(renderSignal).join("")
-        : `<div class="muted">Waiting for first V3.4 evaluation.</div>`;
-
-    document.getElementById("open").innerHTML =
-      renderRows(d.open_positions || [], true);
-
-    document.getElementById("closed").innerHTML =
-      renderRows(d.closed_trades || [], false);
-
-    document.getElementById("error").innerHTML =
-      d.error
-        ? `<div class="error">${esc(d.error)}</div>`
-        : "";
-
-  } catch (e) {
-    document.getElementById("error").innerHTML =
-      `<div class="error">${esc(e)}</div>`;
-  }
-}
-
-refresh();
-setInterval(refresh, 5000);
-</script>
+    async function refresh() {
+      try {
+        const response = await fetch("./api/dashboard", { cache: "no-store" });
+        if (!response.ok) throw new Error(`Dashboard API returned HTTP ${response.status}`);
+        const d = await response.json(); renderSummary(d); renderIdentity(d);
+        const signals = d.signals || []; document.getElementById("signal-list").innerHTML = signals.length ? signals.map(renderSignal).join("") : `<div class="panel" style="padding:24px;color:var(--muted)">Waiting for the first completed V3.4 evaluation…</div>`;
+        const open = d.open_positions || []; const closed = d.closed_trades || []; document.getElementById("open").innerHTML = renderOpen(open); document.getElementById("closed").innerHTML = renderClosed(closed);
+        document.getElementById("error").innerHTML = d.error ? `<div class="error">${esc(d.error)}</div>` : "";
+      } catch (e) {
+        document.getElementById("error").innerHTML = `<div class="error">Dashboard refresh failed: ${esc(e)}</div>`;
+      }
+    }
+    refresh(); setInterval(refresh, 5000);
+  </script>
 </body>
 </html>
