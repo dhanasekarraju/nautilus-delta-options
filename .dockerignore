@@ -11,4 +11,11 @@ htmlcov
 data
 *.sqlite
 *.sqlite-*
-tests
+
+.audit*
+.env
+.env.*
+*.pem
+*.key
+*.bundle
+*.zip

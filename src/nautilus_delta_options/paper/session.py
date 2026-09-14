@@ -70,6 +70,11 @@ class PaperLedgerSession:
         return cls(persisted, store)
 
     @property
+    def revision(self) -> int | None:
+        with self._lock:
+            return self._revision
+
+    @property
     def ledger(self) -> PaperLedger:
         return self.snapshot()
 

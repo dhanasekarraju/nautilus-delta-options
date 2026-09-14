@@ -3,6 +3,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from fastapi import Response
 from test_paper_ledger import TIMESTAMP_US, _ledger, _record, _ticker
 
 from nautilus_delta_options.delta.history import parse_history_candles_payload
@@ -155,7 +156,7 @@ def test_v34_health_exposes_uninitialized_loops(tmp_path):
 
     from nautilus_delta_options.web.v34_paper_app import create_v34_paper_app
     app = create_v34_paper_app(database=tmp_path / "paper.sqlite", entries_enabled=False)
-    health = _route_endpoint(app, "/health")()
+    health = _route_endpoint(app, "/health")(Response())
     assert health["status"] == "error"
     assert len(health["errors"]) == 3
     assert health["real_orders_enabled"] is False

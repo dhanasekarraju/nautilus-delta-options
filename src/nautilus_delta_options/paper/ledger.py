@@ -578,6 +578,17 @@ class PaperLedger:
         from nautilus_delta_options.paper.quote_safety import validate_quote_time
 
         validate_quote_time(event_ns, observed)
+        if position.settlement_ns > 0 and observed >= position.settlement_ns:
+            raise ValueError("Contract expired; verified settlement reconciliation is required")
+        for value in (ticker.best_bid, ticker.best_ask, ticker.bid_size,
+                      ticker.ask_size, ticker.spot_price):
+            if value is not None and not value.is_finite():
+                raise ValueError("Nonfinite exit quote")
+        if ticker.spot_price <= 0:
+            raise ValueError("Exit spot must be positive")
+        if (ticker.best_bid is not None and ticker.best_ask is not None
+                and ticker.best_bid > ticker.best_ask):
+            raise ValueError("Crossed exit quote")
         if event_ns < position.last_quote_ns:
             raise ValueError("Exit ticker predates the position or latest observation")
         if event_ns < position.opened_ns - 15_000_000_000:

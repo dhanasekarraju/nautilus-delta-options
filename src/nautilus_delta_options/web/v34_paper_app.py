@@ -5,14 +5,14 @@ import logging
 import math
 import os
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager, suppress
+from contextlib import ExitStack, asynccontextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import cast
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.responses import HTMLResponse
 
 from nautilus_delta_options.delta.history import (
@@ -50,6 +50,7 @@ from nautilus_delta_options.paper.v34_shadow import (
 from nautilus_delta_options.signals.v34 import (
     V34Decision,
 )
+from nautilus_delta_options.web.lifecycle import DatabaseLease, run_blocking
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -130,6 +131,13 @@ def create_v34_paper_app(
         )
     )
 
+    for name, interval in (
+        ("signal", signal_interval), ("fast exit", fast_exit_interval),
+        ("slow exit", slow_exit_interval),
+    ):
+        if not math.isfinite(interval) or interval <= 0:
+            raise ValueError(f"{name} interval must be finite and positive")
+
     initial_cash = _decimal_env(
         "V34_PAPER_INITIAL_CASH",
         "250",
@@ -143,6 +151,12 @@ def create_v34_paper_app(
         3,
     )
 
+    research_database = Path(
+        os.getenv("V34_PAYOFF_DATABASE", str(resolved_database) + ".payoff.sqlite"),
+    )
+    if research_database.resolve() == resolved_database.resolve():
+        raise ValueError("Primary and research databases must have distinct paths")
+
     store = SQLitePaperLedgerStore(
         resolved_database,
     )
@@ -154,7 +168,7 @@ def create_v34_paper_app(
     )
 
     research = PayoffResearch(
-        Path(os.getenv("V34_PAYOFF_DATABASE", str(resolved_database) + ".payoff.sqlite")),
+        research_database,
         profile=PayoffProfile(os.getenv("V34_PAYOFF_PROFILE", "baseline_v34")),
         gst=session.snapshot().gst_rate,
         penalty=_decimal_env("V34_PAYOFF_PENALTY", "0"),
@@ -195,50 +209,60 @@ def create_v34_paper_app(
     async def lifespan(
         _: FastAPI,
     ) -> AsyncIterator[None]:
-        signal_task = asyncio.create_task(
-            _poll_v34_signals(
-                observer=v34_observer,
-                delta_client=delta_client,
-                session=session,
-                state=state,
-                entries_enabled=resolved_entries_enabled,
-                interval_seconds=signal_interval,
-            ),
-        )
+        with ExitStack() as ownership:
+            # Sorting prevents inconsistent lock acquisition across cooperating services.
+            for path in sorted((resolved_database.resolve(), research_database.resolve())):
+                ownership.enter_context(DatabaseLease(path))
+            # The factory may have loaded state before another service released its lease.
+            current = store.load()
+            if current is None:
+                raise RuntimeError("Primary ledger disappeared before service startup")
+            if store.revision != session.revision:
+                raise RuntimeError("Primary ledger changed before startup; recreate the service")
+            signal_task = asyncio.create_task(
+                _poll_v34_signals(
+                    observer=v34_observer,
+                    delta_client=delta_client,
+                    session=session,
+                    state=state,
+                    entries_enabled=resolved_entries_enabled,
+                    interval_seconds=signal_interval,
+                ),
+            )
 
-        fast_exit_task = asyncio.create_task(
-            _poll_fast_exits(
-                delta_client=delta_client,
-                session=session,
-                state=state,
-                interval_seconds=fast_exit_interval,
-                research=research,
-            ),
-        )
+            fast_exit_task = asyncio.create_task(
+                _poll_fast_exits(
+                    delta_client=delta_client,
+                    session=session,
+                    state=state,
+                    interval_seconds=fast_exit_interval,
+                    research=research,
+                ),
+            )
 
-        slow_exit_task = asyncio.create_task(
-            _poll_slow_exits(
-                observer=exit_observer,
-                state=state,
-                interval_seconds=slow_exit_interval,
-            ),
-        )
+            slow_exit_task = asyncio.create_task(
+                _poll_slow_exits(
+                    observer=exit_observer,
+                    state=state,
+                    interval_seconds=slow_exit_interval,
+                ),
+            )
 
-        tasks = (
-            signal_task,
-            fast_exit_task,
-            slow_exit_task,
-        )
+            tasks = (
+                signal_task,
+                fast_exit_task,
+                slow_exit_task,
+            )
 
-        try:
-            yield
-        finally:
-            for task in tasks:
-                task.cancel()
+            try:
+                yield
+            finally:
+                for task in tasks:
+                    task.cancel()
 
-            for task in tasks:
-                with suppress(asyncio.CancelledError):
-                    await task
+                for task in tasks:
+                    with suppress(asyncio.CancelledError):
+                        await task
 
     application = FastAPI(
         title="Nautilus V3.4 Paper Live",
@@ -271,16 +295,18 @@ def create_v34_paper_app(
         )
 
     @application.get("/health")
-    def health() -> dict[str, object]:
+    def health(response: Response) -> dict[str, object]:
         ledger = session.snapshot()
+        errors = _health_errors(state)
+        response.status_code = 503 if errors else 200
 
         return {
             "status": (
                 "error"
-                if _health_errors(state)
+                if errors
                 else "ready"
             ),
-            "errors": _health_errors(state),
+            "errors": errors,
             "mode": "paper_live",
             "strategy": "v3.4",
             "real_orders_enabled": False,
@@ -315,7 +341,7 @@ async def _poll_v34_signals(
 ) -> None:
     while True:
         try:
-            cycle = await asyncio.to_thread(
+            cycle = await run_blocking(
                 observer.run_cycle,
             )
 
@@ -344,6 +370,7 @@ async def _poll_v34_signals(
 
                 if (
                     entries_enabled
+                    and not _health_errors(state)
                     and reserved < _TARGET_CLOSED_TRADES
                 ):
                     remaining = (
@@ -357,7 +384,7 @@ async def _poll_v34_signals(
                     )
 
                     state.latest_entry_cycle = (
-                        await asyncio.to_thread(
+                        await run_blocking(
                             run_v34_paper_entry_cycle,
                             cycle=entry_cycle,
                             delta_client=delta_client,
@@ -413,12 +440,12 @@ async def _poll_fast_exits(
             active_research = research
             if research is not None:
                 try:
-                    await asyncio.to_thread(research.sync_entries, session.snapshot())
-                    extra_symbols = await asyncio.to_thread(research.symbols)
+                    await run_blocking(research.sync_entries, session.snapshot())
+                    extra_symbols = await run_blocking(research.symbols)
                 except Exception as error:
                     research_warning = (f"Payoff research synchronization failed: {error}",)
                     active_research = None
-            cycle = await asyncio.to_thread(
+            cycle = await run_blocking(
                 run_fast_exit_cycle,
                 apply_time_policy=True,
                 client=delta_client,
@@ -469,7 +496,7 @@ async def _poll_slow_exits(
 ) -> None:
     while True:
         try:
-            cycle = await asyncio.to_thread(
+            cycle = await run_blocking(
                 observer.run_cycle,
             )
 

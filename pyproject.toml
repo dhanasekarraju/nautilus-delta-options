@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "nautilus-delta-options"
 version = "0.1.0"
 description = "Payoff-first BTC and ETH options dry-run engine for Delta Exchange India"
-requires-python = ">=3.12,<3.15"
+requires-python = ">=3.12,<3.13"
 dependencies = [
     "nautilus_trader==2.0.0rc3",
     "numpy==2.3.5",

@@ -4,6 +4,7 @@ import json
 import sqlite3
 import time
 from collections.abc import Mapping
+from contextlib import closing
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -75,7 +76,7 @@ class SQLitePaperLedgerStore:
             sort_keys=True,
         )
 
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             self._check_revision(
                 connection,
@@ -109,7 +110,7 @@ class SQLitePaperLedgerStore:
             trade_id=1,
         )
 
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             row = connection.execute(
                 """
                 SELECT 1
@@ -161,7 +162,7 @@ class SQLitePaperLedgerStore:
             consumed_ns=consumed_ns,
         )
 
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             existing = connection.execute(
                 """
@@ -224,7 +225,7 @@ class SQLitePaperLedgerStore:
         return receipt
 
     def load(self) -> PaperLedger | None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             row = connection.execute(
                 """
                 SELECT schema_version, payload, updated_ns
@@ -263,7 +264,7 @@ class SQLitePaperLedgerStore:
         return connection
 
     def _initialize(self) -> None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("PRAGMA journal_mode = WAL")
             connection.execute("PRAGMA synchronous = FULL")
             connection.execute(

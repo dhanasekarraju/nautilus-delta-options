@@ -1,0 +1,31 @@
+name: RC paper validation
+on:
+  pull_request:
+  push:
+    branches: ["rc/**"]
+permissions:
+  contents: read
+jobs:
+  python312:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -c constraints-py312.txt '.[dev]'
+      - run: python -m pytest -q
+        env:
+          PAPER_DATABASE: /tmp/rc-paper.sqlite
+          V34_PAPER_DATABASE: /tmp/rc-v34-paper.sqlite
+      - run: python -m ruff check src tests
+      - run: python -m mypy src
+      - run: python -m nautilus_delta_options.runtime_check
+      - run: python -m pip check
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build --target validation --progress plain .
+      - run: docker build --target runtime -t nautilus-v34-rc:test .
+      - run: docker run --rm --network none --entrypoint python nautilus-v34-rc:test -m nautilus_delta_options.runtime_check

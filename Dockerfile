@@ -1,4 +1,4 @@
-FROM python:3.12-slim-bookworm
+FROM python:3.12-slim-bookworm AS application
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -39,3 +39,18 @@ HEALTHCHECK \
 ENTRYPOINT ["python", "-m", "nautilus_delta_options"]
 
 CMD ["--database", "/data/paper-ledger.sqlite", "--interval-seconds", "60"]
+
+
+# Optional build gate. The final/default target below remains the runtime image.
+FROM application AS validation
+USER root
+COPY tests ./tests
+RUN python -m pip install -c constraints-py312.txt '.[dev]' \
+    && PAPER_DATABASE=/tmp/validation.sqlite V34_PAPER_DATABASE=/tmp/v34-validation.sqlite \
+       python -m pytest -q \
+    && python -m ruff check src tests \
+    && python -m mypy src \
+    && python -m nautilus_delta_options.runtime_check \
+    && python -m pip check
+
+FROM application AS runtime

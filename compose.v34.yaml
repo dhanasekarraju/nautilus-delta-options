@@ -1,7 +1,9 @@
 name: nautilus-delta-options-v34
 services:
   dashboard:
-    build: .
+    build:
+      context: .
+      target: runtime
     image: nautilus-delta-options:v34-paper
     entrypoint: ["python", "-m", "uvicorn"]
     command: ["nautilus_delta_options.web.v34_paper_app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--no-access-log"]
@@ -25,5 +27,14 @@ services:
     security_opt: ["no-new-privileges:true"]
     init: true
     restart: unless-stopped
+    stop_grace_period: 120s
+    pids_limit: 256
+    cpus: 1.0
+    mem_limit: 1g
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 volumes:
   v34_paper_data:
