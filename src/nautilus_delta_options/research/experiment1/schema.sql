@@ -151,7 +151,7 @@ CREATE TABLE source_responses (
     request_elapsed_ns INTEGER NOT NULL,
 
     source_payload_sha256 TEXT NOT NULL,
-    raw_response_json TEXT NOT NULL,
+    raw_response_body BLOB NOT NULL,
     parse_status TEXT NOT NULL,
 
     FOREIGN KEY (experiment_id)
