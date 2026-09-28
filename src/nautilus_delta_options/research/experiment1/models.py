@@ -57,6 +57,7 @@ class ExperimentManifest:
     window_start_utc_ns: int
     window_end_utc_ns: int
     endpoint_collection_end_utc_ns: int
+    endpoint_acquisition_deadline_utc_ns: int
 
     signal_engine_source_sha256: str
     collector_build_id: str
@@ -90,9 +91,18 @@ class ExperimentManifest:
             raise ValueError("window end must follow start")
         if (
             self.endpoint_collection_end_utc_ns
-            < self.window_end_utc_ns
+            != self.window_end_utc_ns + 1_800_000_000_000
         ):
-            raise ValueError("endpoint collection cannot end before signal window")
+            raise ValueError(
+                "endpoint collection end must be exactly 30 minutes after signal window"
+            )
+        if (
+            self.endpoint_acquisition_deadline_utc_ns
+            < self.endpoint_collection_end_utc_ns
+        ):
+            raise ValueError(
+                "endpoint acquisition deadline cannot precede endpoint boundary"
+            )
         if self.resolution_seconds != 300:
             raise ValueError("Experiment 1 resolution must remain five minutes")
         if self.primary_horizon_seconds != 1800:

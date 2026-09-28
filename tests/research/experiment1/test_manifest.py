@@ -76,6 +76,10 @@ def test_manifest_hash_changes_with_schedule() -> None:
             2 * FIVE_MINUTES_NS
             + 1_800_000_000_000
         ),
+        endpoint_acquisition_deadline_utc_ns=(
+            2 * FIVE_MINUTES_NS
+            + 1_860_000_000_000
+        ),
         signal_engine_source_sha256="signal-sha",
         collector_build_id="collector-build",
         collector_source_sha256="collector-sha",

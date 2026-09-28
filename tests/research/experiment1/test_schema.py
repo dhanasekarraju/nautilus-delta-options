@@ -26,6 +26,7 @@ def _insert_manifest(con: sqlite3.Connection) -> None:
             window_start_utc_ns,
             window_end_utc_ns,
             endpoint_collection_end_utc_ns,
+            endpoint_acquisition_deadline_utc_ns,
             assets_json,
             source_symbols_json,
             venue,
@@ -55,6 +56,7 @@ def _insert_manifest(con: sqlite3.Connection) -> None:
             1000000000,
             601000000000,
             2401000000000,
+            2461000000000,
             '["BTC","ETH"]',
             '{"BTC":"BTCUSD","ETH":"ETHUSD"}',
             'Delta Exchange India',
@@ -126,6 +128,7 @@ def test_schema_loads_and_foreign_keys_are_enabled() -> None:
         "experiment_manifest",
         "evaluation_slots",
         "journal_events",
+        "source_responses",
         "candle_observations",
         "evaluation_candle_inputs",
         "signal_endpoints",
@@ -266,5 +269,177 @@ def test_journal_events_are_append_only() -> None:
             """
             DELETE FROM journal_events
             WHERE event_id = 'event-1'
+            """
+        )
+
+
+def test_source_response_is_append_only_and_candle_links_to_it() -> None:
+    con = _database()
+    _insert_manifest(con)
+
+    con.execute(
+        """
+        INSERT INTO source_responses (
+            response_id,
+            experiment_id,
+            run_id,
+            request_id,
+            asset,
+            source_symbol,
+            request_started_utc_ns,
+            response_received_utc_ns,
+            request_elapsed_ns,
+            source_payload_sha256,
+            raw_response_json,
+            parse_status
+        )
+        VALUES (
+            'response-1',
+            'exp-1',
+            'run-1',
+            'request-1',
+            'BTC',
+            'BTCUSD',
+            1000000000,
+            2000000000,
+            1000000000,
+            'response-sha',
+            '{}',
+            'parsed'
+        )
+        """
+    )
+
+    con.execute(
+        """
+        INSERT INTO candle_observations (
+            observation_id,
+            experiment_id,
+            run_id,
+            request_id,
+            response_id,
+            asset,
+            source_symbol,
+            source_timestamp_raw,
+            normalized_open_ns,
+            normalized_close_boundary_ns,
+            open_decimal,
+            high_decimal,
+            low_decimal,
+            close_decimal,
+            volume_decimal,
+            request_started_utc_ns,
+            response_received_utc_ns,
+            request_elapsed_ns,
+            source_payload_sha256,
+            raw_candle_json,
+            parse_status
+        )
+        VALUES (
+            'observation-1',
+            'exp-1',
+            'run-1',
+            'request-1',
+            'response-1',
+            'BTC',
+            'BTCUSD',
+            '0',
+            0,
+            300000000000,
+            '100',
+            '110',
+            '90',
+            '105',
+            '12.5',
+            1000000000,
+            2000000000,
+            1000000000,
+            'response-sha',
+            '{}',
+            'parsed'
+        )
+        """
+    )
+
+    assert con.execute(
+        """
+        SELECT response_id
+        FROM candle_observations
+        WHERE observation_id = 'observation-1'
+        """
+    ).fetchone()[0] == "response-1"
+
+    with pytest.raises(
+        sqlite3.IntegrityError,
+        match="source_responses is append-only",
+    ):
+        con.execute(
+            """
+            UPDATE source_responses
+            SET parse_status = 'changed'
+            WHERE response_id = 'response-1'
+            """
+        )
+
+    with pytest.raises(
+        sqlite3.IntegrityError,
+        match="source_responses is append-only",
+    ):
+        con.execute(
+            """
+            DELETE FROM source_responses
+            WHERE response_id = 'response-1'
+            """
+        )
+
+    with pytest.raises(sqlite3.IntegrityError):
+        con.execute(
+            """
+            INSERT INTO candle_observations (
+                observation_id,
+                experiment_id,
+                run_id,
+                request_id,
+                response_id,
+                asset,
+                source_symbol,
+                source_timestamp_raw,
+                normalized_open_ns,
+                normalized_close_boundary_ns,
+                open_decimal,
+                high_decimal,
+                low_decimal,
+                close_decimal,
+                volume_decimal,
+                request_started_utc_ns,
+                response_received_utc_ns,
+                request_elapsed_ns,
+                source_payload_sha256,
+                raw_candle_json,
+                parse_status
+            )
+            VALUES (
+                'observation-bad',
+                'exp-1',
+                'run-1',
+                'request-missing',
+                'missing-response',
+                'BTC',
+                'BTCUSD',
+                '0',
+                0,
+                300000000000,
+                '100',
+                '110',
+                '90',
+                '105',
+                '12.5',
+                1000000000,
+                2000000000,
+                1000000000,
+                'missing-sha',
+                '{}',
+                'parsed'
+            )
             """
         )

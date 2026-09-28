@@ -10,6 +10,7 @@ CREATE TABLE experiment_manifest (
     window_start_utc_ns INTEGER NOT NULL,
     window_end_utc_ns INTEGER NOT NULL,
     endpoint_collection_end_utc_ns INTEGER NOT NULL,
+    endpoint_acquisition_deadline_utc_ns INTEGER NOT NULL,
 
     assets_json TEXT NOT NULL,
     source_symbols_json TEXT NOT NULL,
@@ -36,7 +37,14 @@ CREATE TABLE experiment_manifest (
     created_at_utc_ns INTEGER NOT NULL,
 
     CHECK (window_end_utc_ns > window_start_utc_ns),
-    CHECK (endpoint_collection_end_utc_ns >= window_end_utc_ns),
+    CHECK (
+        endpoint_collection_end_utc_ns
+        = window_end_utc_ns + 1800000000000
+    ),
+    CHECK (
+        endpoint_acquisition_deadline_utc_ns
+        >= endpoint_collection_end_utc_ns
+    ),
     CHECK (resolution_seconds = 300),
     CHECK (primary_horizon_seconds = 1800)
 );
@@ -128,12 +136,49 @@ CREATE INDEX journal_events_attempt_idx
         sequence
     );
 
+CREATE TABLE source_responses (
+    response_id TEXT PRIMARY KEY,
+
+    experiment_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+
+    asset TEXT NOT NULL,
+    source_symbol TEXT NOT NULL,
+
+    request_started_utc_ns INTEGER NOT NULL,
+    response_received_utc_ns INTEGER NOT NULL,
+    request_elapsed_ns INTEGER NOT NULL,
+
+    source_payload_sha256 TEXT NOT NULL,
+    raw_response_json TEXT NOT NULL,
+    parse_status TEXT NOT NULL,
+
+    FOREIGN KEY (experiment_id)
+        REFERENCES experiment_manifest(experiment_id),
+
+    CHECK (asset IN ('BTC', 'ETH')),
+    CHECK (
+        response_received_utc_ns
+        >= request_started_utc_ns
+    ),
+    CHECK (request_elapsed_ns >= 0)
+);
+
+CREATE INDEX source_responses_lookup_idx
+    ON source_responses (
+        experiment_id,
+        asset,
+        response_received_utc_ns
+    );
+
 CREATE TABLE candle_observations (
     observation_id TEXT PRIMARY KEY,
 
     experiment_id TEXT NOT NULL,
     run_id TEXT NOT NULL,
     request_id TEXT NOT NULL,
+    response_id TEXT NOT NULL,
 
     asset TEXT NOT NULL,
     source_symbol TEXT NOT NULL,
@@ -159,6 +204,9 @@ CREATE TABLE candle_observations (
 
     FOREIGN KEY (experiment_id)
         REFERENCES experiment_manifest(experiment_id),
+
+    FOREIGN KEY (response_id)
+        REFERENCES source_responses(response_id),
 
     CHECK (asset IN ('BTC', 'ETH')),
     CHECK (
@@ -281,6 +329,18 @@ CREATE TRIGGER journal_events_no_delete
 BEFORE DELETE ON journal_events
 BEGIN
     SELECT RAISE(ABORT, 'journal_events is append-only');
+END;
+
+CREATE TRIGGER source_responses_no_update
+BEFORE UPDATE ON source_responses
+BEGIN
+    SELECT RAISE(ABORT, 'source_responses is append-only');
+END;
+
+CREATE TRIGGER source_responses_no_delete
+BEFORE DELETE ON source_responses
+BEGIN
+    SELECT RAISE(ABORT, 'source_responses is append-only');
 END;
 
 CREATE TRIGGER candle_observations_no_update
