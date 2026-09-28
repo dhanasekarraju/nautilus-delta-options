@@ -211,3 +211,178 @@ def test_incomplete_existing_database_is_rejected_without_repair(
 
     assert tables == {"experiment_manifest"}
     assert triggers == set()
+
+
+def test_batch_is_admitted_as_one_queue_envelope_and_committed(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "observations.sqlite"
+
+    journal = ExperimentJournal(
+        database_path,
+        max_queue_items=1,
+        batch_size=1,
+        flush_interval_seconds=0.01,
+        start_immediately=False,
+    )
+
+    _create_probe_table(database_path)
+
+    sql = """
+        INSERT INTO writer_probe (sequence, value)
+        VALUES (?, ?)
+    """
+
+    assert journal.enqueue_batch(
+        (
+            (sql, (1, "first")),
+            (sql, (2, "second")),
+        )
+    )
+
+    # One multi-statement bundle occupies one queue envelope.
+    assert not journal.enqueue(
+        sql,
+        (3, "rejected"),
+    )
+
+    before = journal.stats()
+    assert before.accepted == 1
+    assert before.rejected == 1
+    assert before.written == 0
+    assert before.queued_bytes > 0
+
+    journal.start()
+
+    assert journal.close(timeout_seconds=2.0)
+
+    after = journal.stats()
+    assert after.accepted == 1
+    assert after.rejected == 1
+    assert after.written == 1
+    assert after.queued_bytes == 0
+    assert after.fatal_error is None
+
+    with sqlite3.connect(database_path) as con:
+        rows = con.execute(
+            """
+            SELECT sequence, value
+            FROM writer_probe
+            ORDER BY sequence
+            """
+        ).fetchall()
+
+    assert rows == [
+        (1, "first"),
+        (2, "second"),
+    ]
+
+
+def test_batch_rolls_back_all_statements_on_failure(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "observations.sqlite"
+
+    journal = ExperimentJournal(
+        database_path,
+        batch_size=1,
+        flush_interval_seconds=0.01,
+        start_immediately=False,
+    )
+
+    _create_probe_table(database_path)
+
+    assert journal.enqueue_batch(
+        (
+            (
+                """
+                INSERT INTO writer_probe (sequence, value)
+                VALUES (?, ?)
+                """,
+                (1, "must-roll-back"),
+            ),
+            (
+                "INSERT INTO table_that_does_not_exist VALUES (?)",
+                ("boom",),
+            ),
+        )
+    )
+
+    journal.start()
+
+    assert not journal.close(timeout_seconds=2.0)
+
+    stats = journal.stats()
+    assert stats.accepted == 1
+    assert stats.written == 0
+    assert stats.queued_bytes == 0
+    assert stats.fatal_error is not None
+    assert "OperationalError" in stats.fatal_error
+
+    with sqlite3.connect(database_path) as con:
+        rows = con.execute(
+            """
+            SELECT sequence, value
+            FROM writer_probe
+            """
+        ).fetchall()
+
+    assert rows == []
+
+
+def test_batch_byte_capacity_is_checked_for_whole_envelope(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "observations.sqlite"
+
+    journal = ExperimentJournal(
+        database_path,
+        max_queue_bytes=15,
+        start_immediately=False,
+    )
+
+    # Each statement is 11 estimated bytes:
+    # len("SELECT ?") == 8 plus len("abc") == 3.
+    # Either alone fits, while the two-statement envelope does not.
+    assert not journal.enqueue_batch(
+        (
+            ("SELECT ?", ("abc",)),
+            ("SELECT ?", ("def",)),
+        )
+    )
+
+    stats = journal.stats()
+    assert stats.accepted == 0
+    assert stats.rejected == 1
+    assert stats.written == 0
+    assert stats.queued_bytes == 0
+
+
+def test_batch_rejects_invalid_shape_before_queue_admission(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "observations.sqlite"
+
+    journal = ExperimentJournal(
+        database_path,
+        start_immediately=False,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="at least one statement",
+    ):
+        journal.enqueue_batch(())
+
+    with pytest.raises(ValueError, match="sql must be non-empty"):
+        journal.enqueue_batch(
+            (
+                ("   ", ()),
+            )
+        )
+
+    stats = journal.stats()
+    assert stats.accepted == 0
+    assert stats.rejected == 0
+    assert stats.written == 0
+    assert stats.queued_bytes == 0

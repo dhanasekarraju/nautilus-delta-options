@@ -4,10 +4,12 @@ import queue
 import sqlite3
 import threading
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 SqlParam = str | int | float | bytes | None
+type JournalStatement = tuple[str, tuple[SqlParam, ...]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,8 +23,7 @@ class JournalStats:
 
 @dataclass(frozen=True, slots=True)
 class _WriteEnvelope:
-    sql: str
-    params: tuple[SqlParam, ...]
+    statements: tuple[JournalStatement, ...]
     estimated_bytes: int
 
 
@@ -104,15 +105,37 @@ class ExperimentJournal:
         sql: str,
         params: tuple[SqlParam, ...] = (),
     ) -> bool:
-        """Attempt a non-blocking journal write admission."""
+        """Attempt a non-blocking single-statement journal admission."""
 
-        if not sql.strip():
-            raise ValueError("sql must be non-empty")
+        return self.enqueue_batch(((sql, params),))
 
-        estimated_bytes = _estimate_envelope_bytes(sql, params)
+    def enqueue_batch(
+        self,
+        statements: Sequence[JournalStatement],
+    ) -> bool:
+        """Admit one atomic multi-statement evidence envelope."""
+
+        normalized = tuple(
+            (sql, tuple(params))
+            for sql, params in statements
+        )
+
+        if not normalized:
+            raise ValueError(
+                "journal batch must contain at least one statement"
+            )
+
+        for sql, _params in normalized:
+            if not sql.strip():
+                raise ValueError("sql must be non-empty")
+
+        estimated_bytes = sum(
+            _estimate_statement_bytes(sql, params)
+            for sql, params in normalized
+        )
+
         envelope = _WriteEnvelope(
-            sql=sql,
-            params=params,
+            statements=normalized,
             estimated_bytes=estimated_bytes,
         )
 
@@ -325,7 +348,8 @@ class ExperimentJournal:
                     con.execute("BEGIN IMMEDIATE")
 
                     for item in batch:
-                        con.execute(item.sql, item.params)
+                        for sql, params in item.statements:
+                            con.execute(sql, params)
 
                     con.commit()
                 except Exception:
@@ -372,7 +396,7 @@ class ExperimentJournal:
             self._queue.task_done()
 
 
-def _estimate_envelope_bytes(
+def _estimate_statement_bytes(
     sql: str,
     params: tuple[SqlParam, ...],
 ) -> int:
