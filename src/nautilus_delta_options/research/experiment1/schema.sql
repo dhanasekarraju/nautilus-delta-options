@@ -143,6 +143,9 @@ CREATE TABLE source_responses (
     run_id TEXT NOT NULL,
     request_id TEXT NOT NULL,
 
+    response_kind TEXT NOT NULL,
+    request_url TEXT NOT NULL,
+
     asset TEXT NOT NULL,
     source_symbol TEXT NOT NULL,
 
@@ -157,6 +160,13 @@ CREATE TABLE source_responses (
     FOREIGN KEY (experiment_id)
         REFERENCES experiment_manifest(experiment_id),
 
+    CHECK (
+        response_kind IN (
+            'history',
+            'option_chain'
+        )
+    ),
+    CHECK (length(request_url) > 0),
     CHECK (asset IN ('BTC', 'ETH')),
     CHECK (
         response_received_utc_ns
