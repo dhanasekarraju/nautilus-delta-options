@@ -169,6 +169,7 @@ CREATE TABLE source_responses (
     request_started_utc_ns INTEGER NOT NULL,
     response_received_utc_ns INTEGER NOT NULL,
     request_elapsed_ns INTEGER NOT NULL,
+    clock_anomaly INTEGER NOT NULL,
 
     source_payload_sha256 TEXT NOT NULL,
     raw_response_body BLOB NOT NULL,
@@ -185,11 +186,8 @@ CREATE TABLE source_responses (
     ),
     CHECK (length(request_url) > 0),
     CHECK (asset IN ('BTC', 'ETH')),
-    CHECK (
-        response_received_utc_ns
-        >= request_started_utc_ns
-    ),
-    CHECK (request_elapsed_ns >= 0)
+    CHECK (request_elapsed_ns >= 0),
+    CHECK (clock_anomaly IN (0, 1))
 );
 
 CREATE INDEX source_responses_lookup_idx
@@ -239,10 +237,6 @@ CREATE TABLE candle_observations (
     CHECK (
         normalized_close_boundary_ns
         > normalized_open_ns
-    ),
-    CHECK (
-        response_received_utc_ns
-        >= request_started_utc_ns
     ),
     CHECK (request_elapsed_ns >= 0)
 );

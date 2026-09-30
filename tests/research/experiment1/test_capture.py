@@ -43,10 +43,11 @@ def test_raw_response_bytes_are_retained_and_hashed(
         "success": True,
         "result": [],
     }
-    assert response.response_received_utc_ns >= (
-        response.request_started_utc_ns
-    )
     assert response.request_elapsed_ns >= 0
+    assert response.clock_anomaly == (
+        response.response_received_utc_ns
+        < response.request_started_utc_ns
+    )
 
 
 @pytest.mark.parametrize(
@@ -408,3 +409,23 @@ def test_captured_option_chain_uses_frozen_parser_and_production_url_shape(
 
     assert timeout == 6.0
     assert stop is None
+
+
+
+def test_raw_response_flags_backward_wall_clock_without_rewrite() -> None:
+    response = capture.RawPublicResponse(
+        url=(
+            "https://api.india.delta.exchange/"
+            "v2/history/candles"
+        ),
+        request_started_utc_ns=2_000,
+        response_received_utc_ns=1_500,
+        request_elapsed_ns=25,
+        body=b"{}",
+        sha256=hashlib.sha256(b"{}").hexdigest(),
+    )
+
+    assert response.clock_anomaly
+    assert response.request_started_utc_ns == 2_000
+    assert response.response_received_utc_ns == 1_500
+    assert response.request_elapsed_ns == 25

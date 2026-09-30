@@ -291,6 +291,7 @@ def test_source_response_is_append_only_and_candle_links_to_it() -> None:
             request_started_utc_ns,
             response_received_utc_ns,
             request_elapsed_ns,
+            clock_anomaly,
             source_payload_sha256,
             raw_response_body,
             parse_status
@@ -307,6 +308,7 @@ def test_source_response_is_append_only_and_candle_links_to_it() -> None:
             1000000000,
             2000000000,
             1000000000,
+            0,
             'response-sha',
             X'7B7D',
             'parsed'

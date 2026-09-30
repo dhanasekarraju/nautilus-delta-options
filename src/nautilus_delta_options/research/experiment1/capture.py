@@ -56,6 +56,13 @@ class RawPublicResponse:
     body: bytes
     sha256: str
 
+    @property
+    def clock_anomaly(self) -> bool:
+        return (
+            self.response_received_utc_ns
+            < self.request_started_utc_ns
+        )
+
     def json_payload(self) -> object:
         return cast(object, json.loads(self.body))
 

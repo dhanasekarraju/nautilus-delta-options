@@ -541,11 +541,12 @@ def _source_response_statement(
             request_started_utc_ns,
             response_received_utc_ns,
             request_elapsed_ns,
+            clock_anomaly,
             source_payload_sha256,
             raw_response_body,
             parse_status
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             response_id,
@@ -559,6 +560,7 @@ def _source_response_statement(
             response.request_started_utc_ns,
             response.response_received_utc_ns,
             response.request_elapsed_ns,
+            int(response.clock_anomaly),
             response.sha256,
             response.body,
             "parsed",

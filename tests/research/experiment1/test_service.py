@@ -617,3 +617,104 @@ def test_evaluation_envelope_rejection_persists_nothing(
         assert con.execute(
             "SELECT COUNT(*) FROM journal_events"
         ).fetchone()[0] == 0
+
+
+
+def test_backward_wall_clock_response_is_preserved_without_rewrite(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "observations.sqlite"
+
+    journal = ExperimentJournal(
+        database_path,
+        create_new=True,
+        start_immediately=False,
+    )
+
+    slot = _slot()
+    _seed_manifest_and_slot(database_path, slot)
+
+    normal_history = _history()
+
+    backward_response = RawPublicResponse(
+        url=normal_history.response.url,
+        request_started_utc_ns=1_900_000_000_500_000_000,
+        response_received_utc_ns=1_900_000_000_400_000_000,
+        request_elapsed_ns=100_000_000,
+        body=normal_history.response.body,
+        sha256=normal_history.response.sha256,
+    )
+
+    assert backward_response.clock_anomaly
+
+    history = CapturedHistorySnapshot(
+        response=backward_response,
+        snapshot=DeltaCandleSnapshot(
+            underlying=normal_history.snapshot.underlying,
+            symbol=normal_history.snapshot.symbol,
+            resolution=normal_history.snapshot.resolution,
+            candles=normal_history.snapshot.candles,
+            captured_ns=backward_response.request_started_utc_ns,
+        ),
+    )
+
+    option_chain = _option_chain()
+
+    refs = enqueue_completed_evaluation(
+        journal,
+        experiment_id="exp-1",
+        run_id="run-clock-anomaly",
+        slot=slot,
+        attempt_id="attempt-clock-anomaly",
+        history=history,
+        option_chain=option_chain,
+        evaluated_option_chain=option_chain.snapshot,
+        signal=_signal(),
+        previous_chain=None,
+        config=V34Config(),
+        as_of=date(2026, 9, 30),
+        event_time_utc_ns=1_900_000_000_600_000_000,
+    )
+
+    assert refs is not None
+
+    journal.start()
+    assert journal.close(timeout_seconds=2.0)
+
+    with sqlite3.connect(database_path) as con:
+        source_row = con.execute(
+            """
+            SELECT
+                request_started_utc_ns,
+                response_received_utc_ns,
+                request_elapsed_ns,
+                clock_anomaly
+            FROM source_responses
+            WHERE response_kind = 'history'
+            """
+        ).fetchone()
+
+        candle_rows = con.execute(
+            """
+            SELECT DISTINCT
+                request_started_utc_ns,
+                response_received_utc_ns,
+                request_elapsed_ns
+            FROM candle_observations
+            """
+        ).fetchall()
+
+    assert source_row == (
+        1_900_000_000_500_000_000,
+        1_900_000_000_400_000_000,
+        100_000_000,
+        1,
+    )
+
+    assert candle_rows == [
+        (
+            1_900_000_000_500_000_000,
+            1_900_000_000_400_000_000,
+            100_000_000,
+        )
+    ]
