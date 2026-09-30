@@ -399,3 +399,53 @@ def test_schema_version_is_two(
         assert con.execute(
             "PRAGMA user_version"
         ).fetchone()[0] == 2
+
+
+def test_population_loader_reports_durable_evaluation_count(
+    tmp_path: Path,
+) -> None:
+    path = _database(tmp_path)
+
+    with sqlite3.connect(path) as con:
+        con.execute("PRAGMA foreign_keys = ON")
+
+        _insert_evaluation_event(
+            con,
+            slot_id="slot-1",
+            event_id="event-1",
+            attempt_id="attempt-1",
+        )
+
+        con.execute(
+            *build_canonical_population_statement(
+                experiment_id="exp-1",
+                run_id="run-1",
+                slot_id="slot-1",
+                event_id="event-1",
+                attempt_id="attempt-1",
+                decision=V34Decision.WAIT,
+                captured_ns=123,
+                recorded_at_utc_ns=456,
+            )
+        )
+
+        _insert_evaluation_event(
+            con,
+            slot_id="slot-1",
+            event_id="event-2",
+            attempt_id="attempt-2",
+        )
+
+    bindings = load_population_bindings(
+        path,
+        experiment_id="exp-1",
+    )
+
+    binding = next(
+        item
+        for item in bindings
+        if item.slot_id == "slot-1"
+    )
+
+    assert binding.binding_kind == "canonical"
+    assert binding.durable_evaluation_count == 2

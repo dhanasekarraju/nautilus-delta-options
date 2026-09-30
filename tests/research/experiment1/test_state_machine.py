@@ -1152,3 +1152,147 @@ def test_duplicate_boundary_matches_frozen_no_chain_refetch(
         "history:BTC",
         "history:ETH",
     ]
+
+
+def test_recovered_canonical_binding_remains_population_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nautilus_delta_options.research.experiment1.population import (
+        PopulationBinding,
+    )
+
+    control = _Control()
+    trace: list[str] = []
+    previous: list[tuple[str, int | None]] = []
+
+    _reset_clock()
+
+    _install_functions(
+        monkeypatch,
+        control=control,
+        trace=trace,
+        previous_seen=previous,
+    )
+
+    history = _History(control, _C1, trace)
+    delta = _Delta(control, trace)
+
+    btc_close_ms = _candles(
+        "BTC",
+        _C1,
+    ).candle_close_ms
+
+    recovered = PopulationBinding(
+        slot_id="btc-c1",
+        experiment_id="exp-1",
+        asset="BTC",
+        candle_close_boundary_ns=(
+            (btc_close_ms + 1) * 1_000_000
+        ),
+        binding_kind="canonical",
+        canonical_event_id="event-1",
+        canonical_attempt_id="attempt-1",
+        canonical_decision=V34Decision.WAIT,
+        canonical_captured_ns=123,
+        reason=None,
+        recorded_at_utc_ns=456,
+        durable_evaluation_count=2,
+    )
+
+    observed: list[EvaluationReturn] = []
+
+    observer = Experiment1ObserverStateMachine(
+        history_client=history,  # type: ignore[arg-type]
+        delta_client=delta,  # type: ignore[arg-type]
+        clock_ns=_clock,
+        utc_date=lambda: date(2026, 9, 10),
+        on_evaluation_return=observed.append,
+        population_bindings=(recovered,),
+    )
+
+    cycle = observer.run_cycle()
+
+    assert cycle.evaluated is True
+
+    btc = next(
+        item
+        for item in observed
+        if item.underlying == "BTC"
+    )
+
+    assert btc.population_status == "same_decision_retry"
+    assert btc.retry_ordinal == 2
+    assert btc.canonical_decision is V34Decision.WAIT
+    assert btc.canonical_captured_ns == 123
+
+
+def test_recovered_gap_can_never_be_promoted_to_canonical(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nautilus_delta_options.research.experiment1.population import (
+        PopulationBinding,
+    )
+
+    control = _Control()
+    trace: list[str] = []
+    previous: list[tuple[str, int | None]] = []
+
+    _reset_clock()
+
+    _install_functions(
+        monkeypatch,
+        control=control,
+        trace=trace,
+        previous_seen=previous,
+    )
+
+    history = _History(control, _C1, trace)
+    delta = _Delta(control, trace)
+
+    btc_close_ms = _candles(
+        "BTC",
+        _C1,
+    ).candle_close_ms
+
+    recovered_gap = PopulationBinding(
+        slot_id="btc-c1-gap",
+        experiment_id="exp-1",
+        asset="BTC",
+        candle_close_boundary_ns=(
+            (btc_close_ms + 1) * 1_000_000
+        ),
+        binding_kind="gap",
+        canonical_event_id=None,
+        canonical_attempt_id=None,
+        canonical_decision=None,
+        canonical_captured_ns=None,
+        reason="protocol_cutoff_gap",
+        recorded_at_utc_ns=456,
+        durable_evaluation_count=0,
+    )
+
+    observed: list[EvaluationReturn] = []
+
+    observer = Experiment1ObserverStateMachine(
+        history_client=history,  # type: ignore[arg-type]
+        delta_client=delta,  # type: ignore[arg-type]
+        clock_ns=_clock,
+        utc_date=lambda: date(2026, 9, 10),
+        on_evaluation_return=observed.append,
+        population_bindings=(recovered_gap,),
+    )
+
+    cycle = observer.run_cycle()
+
+    assert cycle.evaluated is True
+
+    btc = next(
+        item
+        for item in observed
+        if item.underlying == "BTC"
+    )
+
+    assert btc.population_status == "excluded_by_gap"
+    assert btc.retry_ordinal == 0
+    assert btc.canonical_decision is None
+    assert btc.canonical_captured_ns is None

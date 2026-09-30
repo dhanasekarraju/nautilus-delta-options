@@ -877,3 +877,107 @@ def test_backward_wall_clock_response_is_preserved_without_rewrite(
             100_000_000,
         )
     ]
+
+
+def test_excluded_gap_evaluation_preserves_gap_binding(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "observations.sqlite"
+
+    journal = ExperimentJournal(
+        database_path,
+        create_new=True,
+        start_immediately=False,
+    )
+
+    slot = _slot()
+    _seed_manifest_and_slot(database_path, slot)
+
+    with sqlite3.connect(database_path) as con:
+        con.execute("PRAGMA foreign_keys = ON")
+
+        con.execute(
+            """
+            INSERT INTO population_bindings (
+                slot_id,
+                experiment_id,
+                recorded_run_id,
+                binding_kind,
+                canonical_event_id,
+                canonical_attempt_id,
+                canonical_decision,
+                canonical_captured_ns,
+                reason,
+                recorded_at_utc_ns
+            )
+            VALUES (
+                ?, 'exp-1', 'run-restart', 'gap',
+                NULL, NULL, NULL, NULL,
+                'protocol_cutoff_gap',
+                1
+            )
+            """,
+            (slot.slot_id,),
+        )
+
+    option_chain = _option_chain()
+
+    refs = enqueue_completed_evaluation(
+        journal,
+        experiment_id="exp-1",
+        run_id="run-restart",
+        slot=slot,
+        attempt_id="post-gap-attempt",
+        population_status="excluded_by_gap",
+        retry_ordinal=0,
+        history=_history(),
+        option_chain=option_chain,
+        evaluated_option_chain=option_chain.snapshot,
+        signal=_signal(),
+        previous_chain=None,
+        config=V34Config(),
+        as_of=date(2026, 9, 28),
+        event_time_utc_ns=1_900_000_000_700_000_000,
+    )
+
+    assert refs is not None
+
+    journal.start()
+    assert journal.close(timeout_seconds=2.0)
+
+    with sqlite3.connect(database_path) as con:
+        binding = con.execute(
+            """
+            SELECT
+                binding_kind,
+                canonical_event_id,
+                reason
+            FROM population_bindings
+            WHERE slot_id = ?
+            """,
+            (slot.slot_id,),
+        ).fetchone()
+
+        event_payload = con.execute(
+            """
+            SELECT payload_json
+            FROM journal_events
+            WHERE event_id = ?
+            """,
+            (refs.event_id,),
+        ).fetchone()
+
+    assert binding == (
+        "gap",
+        None,
+        "protocol_cutoff_gap",
+    )
+
+    assert event_payload is not None
+
+    payload = json.loads(event_payload[0])
+
+    assert payload["population_status"] == "excluded_by_gap"
+    assert payload["retry_ordinal"] == 0
+    assert payload["canonical_decision"] is None
+    assert payload["canonical_captured_ns"] is None

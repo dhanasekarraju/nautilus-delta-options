@@ -20,6 +20,7 @@ PopulationStatus = Literal[
     "canonical",
     "same_decision_retry",
     "conflicting_retry",
+    "excluded_by_gap",
 ]
 
 _NS_PER_MS = 1_000_000
@@ -38,6 +39,7 @@ class PopulationBinding:
     canonical_captured_ns: int | None
     reason: str | None
     recorded_at_utc_ns: int
+    durable_evaluation_count: int = 0
 
     @property
     def signal_candle_close_ms(self) -> int:
@@ -300,7 +302,16 @@ def load_population_bindings(
                 binding.canonical_decision,
                 binding.canonical_captured_ns,
                 binding.reason,
-                binding.recorded_at_utc_ns
+                binding.recorded_at_utc_ns,
+                (
+                    SELECT COUNT(*)
+                    FROM journal_events AS event
+                    WHERE event.experiment_id
+                          = binding.experiment_id
+                      AND event.slot_id = binding.slot_id
+                      AND event.event_type
+                          = 'evaluation_completed'
+                ) AS durable_evaluation_count
             FROM population_bindings AS binding
             JOIN evaluation_slots AS slot
               ON slot.slot_id = binding.slot_id
@@ -351,6 +362,7 @@ def load_population_bindings(
                     else str(row[9])
                 ),
                 recorded_at_utc_ns=int(row[10]),
+                durable_evaluation_count=int(row[11]),
             )
         )
 

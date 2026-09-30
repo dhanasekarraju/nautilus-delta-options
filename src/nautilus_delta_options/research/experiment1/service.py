@@ -340,6 +340,8 @@ def build_completed_evaluation_statements(
         "retry_ordinal": retry_ordinal,
         "canonical_decision": (
             effective_canonical_decision.value
+            if effective_canonical_decision is not None
+            else None
         ),
         "canonical_captured_ns": (
             effective_canonical_captured_ns
@@ -391,6 +393,14 @@ def build_completed_evaluation_statements(
     )
 
     if population_status == "canonical":
+        if (
+            effective_canonical_decision is None
+            or effective_canonical_captured_ns is None
+        ):
+            raise RuntimeError(
+                "canonical population metadata was not resolved"
+            )
+
         statements.append(
             build_canonical_population_statement(
                 experiment_id=experiment_id,
@@ -424,7 +434,7 @@ def _normalize_population_metadata(
     retry_ordinal: int,
     canonical_decision: V34Decision | None,
     canonical_captured_ns: int | None,
-) -> tuple[V34Decision, int]:
+) -> tuple[V34Decision | None, int | None]:
     actual_decision = signal.decision
     actual_captured_ns = signal.chain_state.captured_ns
 
@@ -432,11 +442,25 @@ def _normalize_population_metadata(
         "canonical",
         "same_decision_retry",
         "conflicting_retry",
+        "excluded_by_gap",
     ):
         raise ValueError("unsupported population_status")
 
     if retry_ordinal < 0:
         raise ValueError("retry_ordinal cannot be negative")
+
+    if population_status == "excluded_by_gap":
+        if canonical_decision is not None:
+            raise ValueError(
+                "excluded gap cannot have canonical_decision"
+            )
+
+        if canonical_captured_ns is not None:
+            raise ValueError(
+                "excluded gap cannot have canonical_captured_ns"
+            )
+
+        return None, None
 
     if population_status == "canonical":
         if retry_ordinal != 0:

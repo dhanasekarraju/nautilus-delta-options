@@ -4,7 +4,7 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
-from typing import Literal, Protocol, cast
+from typing import Protocol, cast
 
 from nautilus_delta_options.delta.history import DeltaCandleSnapshot
 from nautilus_delta_options.delta.public_client import (
@@ -12,6 +12,10 @@ from nautilus_delta_options.delta.public_client import (
     DeltaUnderlying,
 )
 from nautilus_delta_options.paper import quote_safety
+from nautilus_delta_options.research.experiment1.population import (
+    PopulationBinding,
+    PopulationStatus,
+)
 from nautilus_delta_options.selection.v34_quality import (
     V34ContractQuality,
     V34QualityConfig,
@@ -52,13 +56,6 @@ class ResearchQualitySelection:
     best_put: V34ContractQuality | None
 
 
-PopulationStatus = Literal[
-    "canonical",
-    "same_decision_retry",
-    "conflicting_retry",
-]
-
-
 @dataclass(frozen=True, slots=True)
 class EvaluationReturn:
     underlying: DeltaUnderlying
@@ -74,8 +71,8 @@ class EvaluationReturn:
     # evaluator returns, before evidence persistence and ranking.
     population_status: PopulationStatus
     retry_ordinal: int
-    canonical_decision: V34Decision
-    canonical_captured_ns: int
+    canonical_decision: V34Decision | None
+    canonical_captured_ns: int | None
 
 
 EvaluationReturnHook = Callable[[EvaluationReturn], bool | None]
@@ -114,6 +111,7 @@ class Experiment1ObserverStateMachine:
         clock_ns: Callable[[], int] = time.time_ns,
         utc_date: Callable[[], date] | None = None,
         on_evaluation_return: EvaluationReturnHook | None = None,
+        population_bindings: Sequence[PopulationBinding] = (),
     ) -> None:
         if not underlyings:
             raise ValueError(
@@ -167,10 +165,103 @@ class Experiment1ObserverStateMachine:
             tuple[V34Decision, int],
         ] = {}
 
+        self._population_gaps: set[
+            tuple[DeltaUnderlying, int]
+        ] = set()
+
         self._evaluation_return_counts: dict[
             tuple[DeltaUnderlying, int],
             int,
         ] = {}
+
+        self._hydrate_population_bindings(
+            population_bindings
+        )
+
+    def _hydrate_population_bindings(
+        self,
+        bindings: Sequence[PopulationBinding],
+    ) -> None:
+        """Restore research population ownership only.
+
+        Frozen observer rolling state is intentionally untouched.
+        """
+
+        for binding in bindings:
+            if binding.asset not in self._underlyings:
+                raise ValueError(
+                    "population binding asset is not configured"
+                )
+
+            underlying = binding.asset
+
+            key = (
+                underlying,
+                binding.signal_candle_close_ms,
+            )
+
+            if (
+                key in self._canonical_returns
+                or key in self._population_gaps
+            ):
+                raise ValueError(
+                    "duplicate recovered population binding"
+                )
+
+            if binding.durable_evaluation_count < 0:
+                raise ValueError(
+                    "durable evaluation count cannot be negative"
+                )
+
+            if binding.binding_kind == "canonical":
+                decision = binding.canonical_decision
+                captured_ns = binding.canonical_captured_ns
+
+                if decision is None or captured_ns is None:
+                    raise ValueError(
+                        "canonical population binding is incomplete"
+                    )
+
+                if captured_ns <= 0:
+                    raise ValueError(
+                        "canonical captured_ns must be positive"
+                    )
+
+                if binding.durable_evaluation_count < 1:
+                    raise ValueError(
+                        "canonical binding requires durable "
+                        "evaluation evidence"
+                    )
+
+                self._canonical_returns[key] = (
+                    decision,
+                    captured_ns,
+                )
+
+            elif binding.binding_kind == "gap":
+                if (
+                    binding.canonical_decision is not None
+                    or binding.canonical_captured_ns is not None
+                ):
+                    raise ValueError(
+                        "gap binding cannot contain canonical state"
+                    )
+
+                self._population_gaps.add(key)
+
+            else:
+                raise ValueError(
+                    "unsupported population binding kind"
+                )
+
+            # This is the next ordinal among evaluator-return
+            # evidence already known durably after restart.
+            #
+            # It does not claim that an abruptly terminated process
+            # could not have produced additional non-durable returns.
+            self._evaluation_return_counts[key] = (
+                binding.durable_evaluation_count
+            )
 
     @property
     def entry_authority(self) -> bool:
@@ -396,15 +487,24 @@ class Experiment1ObserverStateMachine:
                 population_key
             )
 
+            is_recovered_gap = (
+                population_key in self._population_gaps
+            )
+
             retry_ordinal = self._evaluation_return_counts.get(
                 population_key,
                 0,
             )
 
-            if canonical is None:
+            if is_recovered_gap:
                 population_status: PopulationStatus = (
-                    "canonical"
+                    "excluded_by_gap"
                 )
+                canonical_decision = None
+                canonical_captured_ns = None
+
+            elif canonical is None:
+                population_status = "canonical"
                 canonical_decision = signal.decision
                 canonical_captured_ns = captured_ns
 
