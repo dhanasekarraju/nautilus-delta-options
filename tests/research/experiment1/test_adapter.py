@@ -4,6 +4,8 @@ import sqlite3
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
@@ -14,8 +16,16 @@ from nautilus_delta_options.delta.history import (
 from nautilus_delta_options.delta.public_client import (
     DeltaOptionChainSnapshot,
 )
+from nautilus_delta_options.research.experiment1 import (
+    adapter as adapter_module,
+)
 from nautilus_delta_options.research.experiment1.adapter import (
     Experiment1EvaluationAdapter,
+)
+from nautilus_delta_options.research.experiment1.capture import (
+    CapturedHistorySnapshot,
+    CapturedOptionChainSnapshot,
+    RawPublicResponse,
 )
 from nautilus_delta_options.research.experiment1.journal import (
     ExperimentJournal,
@@ -23,11 +33,20 @@ from nautilus_delta_options.research.experiment1.journal import (
 from nautilus_delta_options.research.experiment1.manifest import (
     build_schedule,
 )
+from nautilus_delta_options.research.experiment1.market_data import (
+    Experiment1CapturedMarketData,
+)
 from nautilus_delta_options.research.experiment1.ownership import (
     CollectorLease,
 )
 from nautilus_delta_options.research.experiment1.state_machine import (
     EvaluationAttemptContext,
+    EvaluationReturn,
+)
+from nautilus_delta_options.signals.v34 import (
+    V34Config,
+    V34Decision,
+    V34ShadowSignal,
 )
 
 _STEP = 300_000_000_000
@@ -430,3 +449,332 @@ def test_completed_attempt_is_removed_only_explicitly(
             adapter.binding_for_attempt(
                 attempt_id
             )
+
+
+
+class _RetainedMarketData:
+    def __init__(
+        self,
+        context: EvaluationAttemptContext,
+    ) -> None:
+        response = RawPublicResponse(
+            url=(
+                "https://api.india.delta.exchange/"
+                "v2/history/candles"
+            ),
+            request_started_utc_ns=10,
+            response_received_utc_ns=11,
+            request_elapsed_ns=1,
+            body=b"{}",
+            sha256="raw-sha",
+        )
+
+        option_response = RawPublicResponse(
+            url=(
+                "https://api.india.delta.exchange/"
+                "v2/tickers"
+            ),
+            request_started_utc_ns=12,
+            response_received_utc_ns=13,
+            request_elapsed_ns=1,
+            body=b"{}",
+            sha256="option-sha",
+        )
+
+        self.history = CapturedHistorySnapshot(
+            response=response,
+            snapshot=context.candles,
+        )
+
+        self.option_chain = CapturedOptionChainSnapshot(
+            response=option_response,
+            snapshot=context.source_option_chain,
+        )
+
+    def captured_history(
+        self,
+        underlying: str,
+    ) -> CapturedHistorySnapshot:
+        assert underlying == self.history.snapshot.underlying
+        return self.history
+
+    def captured_option_chain(
+        self,
+        underlying: str,
+    ) -> CapturedOptionChainSnapshot:
+        assert (
+            underlying
+            == self.option_chain.snapshot.underlying
+        )
+        return self.option_chain
+
+
+def _evaluation_return(
+    context: EvaluationAttemptContext,
+    *,
+    attempt_id: str | None,
+    population_status: str = "canonical",
+) -> EvaluationReturn:
+    signal = cast(
+        V34ShadowSignal,
+        SimpleNamespace(
+            underlying=context.underlying,
+            candle_close_ms=(
+                context.candles.candle_close_ms
+            ),
+            decision=V34Decision.WAIT,
+        ),
+    )
+
+    return EvaluationReturn(
+        underlying=context.underlying,
+        candles=context.candles,
+        source_option_chain=context.source_option_chain,
+        evaluated_option_chain=(
+            context.evaluated_option_chain
+        ),
+        previous_chain=context.previous_chain,
+        signal=signal,
+        as_of=context.as_of,
+        captured_ns=context.captured_ns,
+        attempt_id=attempt_id,
+        population_status=population_status,  # type: ignore[arg-type]
+        retry_ordinal=0,
+        canonical_decision=(
+            V34Decision.WAIT
+            if population_status == "canonical"
+            else None
+        ),
+        canonical_captured_ns=(
+            context.captured_ns
+            if population_status == "canonical"
+            else None
+        ),
+    )
+
+
+def test_successful_return_uses_same_durable_attempt_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    slots = build_schedule(
+        experiment_id="exp-1",
+        window_start_utc_ns=_WINDOW_START,
+        window_end_utc_ns=_WINDOW_END,
+    )
+
+    path = _database(tmp_path, slots)
+    context = _context("BTC")
+    retained = _RetainedMarketData(context)
+
+    seen: dict[str, object] = {}
+
+    def fake_enqueue(
+        journal,
+        **kwargs,
+    ):
+        seen["journal"] = journal
+        seen.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(
+        adapter_module,
+        "enqueue_completed_evaluation",
+        fake_enqueue,
+    )
+
+    journal_token = object()
+
+    times = iter((100, 101))
+
+    with CollectorLease.acquire(path) as lease:
+        adapter = Experiment1EvaluationAdapter(
+            lease=lease,
+            experiment_id="exp-1",
+            run_id="run-1",
+            slots=slots,
+            utc_ns=lambda: next(times),
+            attempt_id_factory=lambda: "attempt-1",
+            journal=journal_token,  # type: ignore[arg-type]
+            market_data=cast(
+                Experiment1CapturedMarketData,
+                retained,
+            ),
+            config=V34Config(),
+        )
+
+        attempt_id = adapter.on_attempt_start(
+            context
+        )
+
+        result = _evaluation_return(
+            context,
+            attempt_id=attempt_id,
+        )
+
+        assert adapter.on_evaluation_return(
+            result
+        )
+
+        assert seen["journal"] is journal_token
+        assert seen["attempt_id"] == "attempt-1"
+        assert seen["slot"] == slots[0]
+        assert seen["history"] is retained.history
+        assert (
+            seen["option_chain"]
+            is retained.option_chain
+        )
+        assert (
+            seen["evaluated_option_chain"]
+            is context.evaluated_option_chain
+        )
+        assert seen["signal"] is result.signal
+
+        with pytest.raises(
+            RuntimeError,
+            match="unknown active",
+        ):
+            adapter.binding_for_attempt(
+                attempt_id
+            )
+
+
+def test_completed_queue_rejection_keeps_attempt_unresolved(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    slots = build_schedule(
+        experiment_id="exp-1",
+        window_start_utc_ns=_WINDOW_START,
+        window_end_utc_ns=_WINDOW_END,
+    )
+
+    path = _database(tmp_path, slots)
+    context = _context("BTC")
+    retained = _RetainedMarketData(context)
+
+    monkeypatch.setattr(
+        adapter_module,
+        "enqueue_completed_evaluation",
+        lambda *args, **kwargs: None,
+    )
+
+    times = iter((100, 101))
+
+    with CollectorLease.acquire(path) as lease:
+        adapter = Experiment1EvaluationAdapter(
+            lease=lease,
+            experiment_id="exp-1",
+            run_id="run-1",
+            slots=slots,
+            utc_ns=lambda: next(times),
+            attempt_id_factory=lambda: "attempt-1",
+            journal=object(),  # type: ignore[arg-type]
+            market_data=cast(
+                Experiment1CapturedMarketData,
+                retained,
+            ),
+            config=V34Config(),
+        )
+
+        attempt_id = adapter.on_attempt_start(
+            context
+        )
+
+        assert (
+            adapter.on_evaluation_return(
+                _evaluation_return(
+                    context,
+                    attempt_id=attempt_id,
+                )
+            )
+            is False
+        )
+
+        assert (
+            adapter.binding_for_attempt(
+                attempt_id
+            ).attempt_id
+            == attempt_id
+        )
+
+
+def test_return_without_durable_start_is_not_persisted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    slots = build_schedule(
+        experiment_id="exp-1",
+        window_start_utc_ns=_WINDOW_START,
+        window_end_utc_ns=_WINDOW_END,
+    )
+
+    path = _database(tmp_path, slots)
+    context = _context("BTC")
+    retained = _RetainedMarketData(context)
+
+    called = False
+
+    def fake_enqueue(*args, **kwargs):
+        nonlocal called
+        called = True
+        return object()
+
+    monkeypatch.setattr(
+        adapter_module,
+        "enqueue_completed_evaluation",
+        fake_enqueue,
+    )
+
+    with CollectorLease.acquire(path) as lease:
+        adapter = Experiment1EvaluationAdapter(
+            lease=lease,
+            experiment_id="exp-1",
+            run_id="run-1",
+            slots=slots,
+            utc_ns=lambda: 100,
+            journal=object(),  # type: ignore[arg-type]
+            market_data=cast(
+                Experiment1CapturedMarketData,
+                retained,
+            ),
+            config=V34Config(),
+        )
+
+        assert (
+            adapter.on_evaluation_return(
+                _evaluation_return(
+                    context,
+                    attempt_id=None,
+                    population_status="excluded_by_gap",
+                )
+            )
+            is False
+        )
+
+    assert called is False
+
+
+def test_partial_evidence_configuration_is_rejected(
+    tmp_path: Path,
+) -> None:
+    slots = build_schedule(
+        experiment_id="exp-1",
+        window_start_utc_ns=_WINDOW_START,
+        window_end_utc_ns=_WINDOW_END,
+    )
+
+    path = _database(tmp_path, slots)
+
+    with CollectorLease.acquire(path) as lease, pytest.raises(
+        ValueError,
+        match="configured together",
+    ):
+        Experiment1EvaluationAdapter(
+            lease=lease,
+            experiment_id="exp-1",
+            run_id="run-1",
+            slots=slots,
+            utc_ns=lambda: 100,
+            journal=object(),  # type: ignore[arg-type]
+        )

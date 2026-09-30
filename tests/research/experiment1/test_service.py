@@ -29,6 +29,7 @@ from nautilus_delta_options.research.experiment1.models import (
     EvaluationSlot,
 )
 from nautilus_delta_options.research.experiment1.service import (
+    build_completed_evaluation_statements,
     enqueue_completed_evaluation,
 )
 from nautilus_delta_options.signals.v34 import (
@@ -981,3 +982,63 @@ def test_excluded_gap_evaluation_preserves_gap_binding(
     assert payload["retry_ordinal"] == 0
     assert payload["canonical_decision"] is None
     assert payload["canonical_captured_ns"] is None
+
+
+
+def test_excluded_gap_evaluation_retains_evidence_without_binding() -> None:
+    slot = _slot()
+    option_chain = _option_chain()
+
+    statements, refs = build_completed_evaluation_statements(
+        experiment_id="exp-1",
+        run_id="run-gap",
+        slot=slot,
+        attempt_id="attempt-gap",
+        history=_history(),
+        option_chain=option_chain,
+        evaluated_option_chain=option_chain.snapshot,
+        signal=_signal(),
+        population_status="excluded_by_gap",
+        retry_ordinal=0,
+        previous_chain=None,
+        config=V34Config(),
+        as_of=date(2026, 9, 28),
+        event_time_utc_ns=1_900_000_000_500_000_000,
+        canonical_decision=None,
+        canonical_captured_ns=None,
+    )
+
+    assert refs.event_id
+
+    assert not any(
+        "INSERT INTO population_bindings" in sql
+        for sql, _ in statements
+    )
+
+
+def test_excluded_gap_rejects_canonical_metadata() -> None:
+    slot = _slot()
+    option_chain = _option_chain()
+
+    with pytest.raises(
+        ValueError,
+        match="excluded gap cannot have canonical_decision",
+    ):
+        build_completed_evaluation_statements(
+            experiment_id="exp-1",
+            run_id="run-gap",
+            slot=slot,
+            attempt_id="attempt-gap",
+            history=_history(),
+            option_chain=option_chain,
+            evaluated_option_chain=option_chain.snapshot,
+            signal=_signal(),
+            population_status="excluded_by_gap",
+            retry_ordinal=0,
+            previous_chain=None,
+            config=V34Config(),
+            as_of=date(2026, 9, 28),
+            event_time_utc_ns=1_900_000_000_500_000_000,
+            canonical_decision=V34Decision.WAIT,
+            canonical_captured_ns=None,
+        )

@@ -8,15 +8,26 @@ from nautilus_delta_options.research.experiment1.attempts import (
     record_evaluation_attempt_failed,
     record_evaluation_attempt_started,
 )
+from nautilus_delta_options.research.experiment1.journal import (
+    ExperimentJournal,
+)
+from nautilus_delta_options.research.experiment1.market_data import (
+    Experiment1CapturedMarketData,
+)
 from nautilus_delta_options.research.experiment1.models import (
     EvaluationSlot,
 )
 from nautilus_delta_options.research.experiment1.ownership import (
     CollectorLease,
 )
+from nautilus_delta_options.research.experiment1.service import (
+    enqueue_completed_evaluation,
+)
 from nautilus_delta_options.research.experiment1.state_machine import (
     EvaluationAttemptContext,
+    EvaluationReturn,
 )
+from nautilus_delta_options.signals.v34 import V34Config
 
 _NS_PER_MS = 1_000_000
 
@@ -39,6 +50,9 @@ class Experiment1EvaluationAdapter:
         slots: Sequence[EvaluationSlot],
         utc_ns: Callable[[], int],
         attempt_id_factory: Callable[[], str] | None = None,
+        journal: ExperimentJournal | None = None,
+        market_data: Experiment1CapturedMarketData | None = None,
+        config: V34Config | None = None,
     ) -> None:
         if not experiment_id:
             raise ValueError(
@@ -60,6 +74,24 @@ class Experiment1EvaluationAdapter:
                 "slots must be non-empty"
             )
 
+        evidence_parts = (
+            journal,
+            market_data,
+            config,
+        )
+
+        if (
+            any(part is None for part in evidence_parts)
+            and not all(
+                part is None
+                for part in evidence_parts
+            )
+        ):
+            raise ValueError(
+                "journal, market_data, and config must be "
+                "configured together"
+            )
+
         self._lease = lease
         self._experiment_id = experiment_id
         self._run_id = run_id
@@ -68,6 +100,9 @@ class Experiment1EvaluationAdapter:
             attempt_id_factory
             or (lambda: uuid.uuid4().hex)
         )
+        self._journal = journal
+        self._market_data = market_data
+        self._config = config
 
         slot_by_key: dict[
             tuple[str, int],
@@ -230,6 +265,121 @@ class Experiment1EvaluationAdapter:
         )
 
         del self._active_attempts[attempt_id]
+
+        return True
+
+    def on_evaluation_return(
+        self,
+        result: EvaluationReturn,
+    ) -> bool:
+        """Queue exact completed evidence for one evaluator return."""
+
+        attempt_id = result.attempt_id
+
+        # No durable evaluation_started event means this result
+        # cannot be admitted into durable evaluation evidence.
+        if attempt_id is None:
+            return False
+
+        journal = self._journal
+        market_data = self._market_data
+        config = self._config
+
+        if (
+            journal is None
+            or market_data is None
+            or config is None
+        ):
+            raise RuntimeError(
+                "completed evaluation evidence is not configured"
+            )
+
+        binding = self.binding_for_attempt(
+            attempt_id
+        )
+
+        if binding.slot.asset != result.underlying:
+            raise RuntimeError(
+                "evaluation return underlying differs from attempt"
+            )
+
+        expected_boundary_ns = (
+            result.signal.candle_close_ms + 1
+        ) * _NS_PER_MS
+
+        if (
+            binding.slot.candle_close_boundary_ns
+            != expected_boundary_ns
+        ):
+            raise RuntimeError(
+                "evaluation return boundary differs from attempt"
+            )
+
+        history = market_data.captured_history(
+            result.underlying
+        )
+        option_chain = market_data.captured_option_chain(
+            result.underlying
+        )
+
+        # The evidence wrapper must be the exact capture whose parsed
+        # snapshot was handed to the evaluator, never a reconstruction.
+        if history.snapshot is not result.candles:
+            raise RuntimeError(
+                "evaluation history is not the retained raw capture"
+            )
+
+        if (
+            option_chain.snapshot
+            is not result.source_option_chain
+        ):
+            raise RuntimeError(
+                "evaluation option chain is not the retained raw capture"
+            )
+
+        event_time_utc_ns = self._utc_ns()
+
+        if event_time_utc_ns <= 0:
+            raise RuntimeError(
+                "completed evaluation clock must be positive"
+            )
+
+        refs = enqueue_completed_evaluation(
+            journal,
+            experiment_id=self._experiment_id,
+            run_id=self._run_id,
+            slot=binding.slot,
+            attempt_id=attempt_id,
+            history=history,
+            option_chain=option_chain,
+            evaluated_option_chain=(
+                result.evaluated_option_chain
+            ),
+            signal=result.signal,
+            population_status=result.population_status,
+            retry_ordinal=result.retry_ordinal,
+            previous_chain=result.previous_chain,
+            config=config,
+            as_of=result.as_of,
+            event_time_utc_ns=event_time_utc_ns,
+            canonical_decision=result.canonical_decision,
+            canonical_captured_ns=(
+                result.canonical_captured_ns
+            ),
+        )
+
+        if refs is None:
+            # Keep the durable start unresolved. If the process dies,
+            # startup recovery will conservatively seal the slot.
+            return False
+
+        # Queue acceptance is not SQLite durability. Removing the
+        # in-memory binding is still safe because a writer failure
+        # leaves the durable evaluation_started event unresolved,
+        # which startup recovery detects.
+        self.complete_attempt(
+            attempt_id
+        )
 
         return True
 
