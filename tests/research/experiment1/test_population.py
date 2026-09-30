@@ -5,11 +5,20 @@ from pathlib import Path
 
 import pytest
 
+from nautilus_delta_options.research.experiment1.attempts import (
+    load_unresolved_evaluation_attempts,
+    record_evaluation_attempt_failed,
+    record_evaluation_attempt_started,
+    seal_unresolved_attempts_as_gaps,
+)
 from nautilus_delta_options.research.experiment1.journal import (
     ExperimentJournal,
 )
 from nautilus_delta_options.research.experiment1.manifest import (
     sha256_text,
+)
+from nautilus_delta_options.research.experiment1.ownership import (
+    CollectorLease,
 )
 from nautilus_delta_options.research.experiment1.population import (
     build_canonical_population_statement,
@@ -449,3 +458,252 @@ def test_population_loader_reports_durable_evaluation_count(
 
     assert binding.binding_kind == "canonical"
     assert binding.durable_evaluation_count == 2
+
+
+def test_evaluation_started_is_durable_before_async_writer(
+    tmp_path: Path,
+) -> None:
+    path = _database(tmp_path)
+
+    with CollectorLease.acquire(path) as lease:
+        event_id = record_evaluation_attempt_started(
+            lease,
+            experiment_id="exp-1",
+            run_id="run-attempt",
+            slot=_slot_for_test(1),
+            attempt_id="attempt-started",
+            event_time_utc_ns=100,
+        )
+
+        # Read from a separate connection immediately.  No async
+        # ExperimentJournal writer is involved in this commit.
+        with sqlite3.connect(path) as con:
+            row = con.execute(
+                """
+                SELECT event_type, attempt_id
+                FROM journal_events
+                WHERE event_id = ?
+                """,
+                (event_id,),
+            ).fetchone()
+
+    assert row == (
+        "evaluation_started",
+        "attempt-started",
+    )
+
+
+def test_duplicate_attempt_id_is_rejected(
+    tmp_path: Path,
+) -> None:
+    path = _database(tmp_path)
+    slot = _slot_for_test(1)
+
+    with CollectorLease.acquire(path) as lease:
+        record_evaluation_attempt_started(
+            lease,
+            experiment_id="exp-1",
+            run_id="run-attempt",
+            slot=slot,
+            attempt_id="same-attempt",
+            event_time_utc_ns=100,
+        )
+
+        with pytest.raises(
+            RuntimeError,
+            match="attempt_id already exists",
+        ):
+            record_evaluation_attempt_started(
+                lease,
+                experiment_id="exp-1",
+                run_id="run-attempt",
+                slot=slot,
+                attempt_id="same-attempt",
+                event_time_utc_ns=101,
+            )
+
+
+def test_clean_failed_attempt_is_retry_eligible_after_restart(
+    tmp_path: Path,
+) -> None:
+    path = _database(tmp_path)
+    slot = _slot_for_test(1)
+
+    with CollectorLease.acquire(path) as lease:
+        record_evaluation_attempt_started(
+            lease,
+            experiment_id="exp-1",
+            run_id="run-attempt",
+            slot=slot,
+            attempt_id="attempt-failed",
+            event_time_utc_ns=100,
+        )
+
+        record_evaluation_attempt_failed(
+            lease,
+            experiment_id="exp-1",
+            run_id="run-attempt",
+            slot=slot,
+            attempt_id="attempt-failed",
+            reason="synthetic evaluator failure",
+            event_time_utc_ns=101,
+        )
+
+    unresolved = load_unresolved_evaluation_attempts(
+        path,
+        experiment_id="exp-1",
+    )
+
+    assert unresolved == ()
+
+    with CollectorLease.acquire(path) as lease:
+        sealed = seal_unresolved_attempts_as_gaps(
+            lease,
+            experiment_id="exp-1",
+            run_id="run-restart",
+            recorded_at_utc_ns=200,
+        )
+
+    assert sealed == ()
+
+    bindings = load_population_bindings(
+        path,
+        experiment_id="exp-1",
+    )
+
+    assert bindings == ()
+
+
+def test_unresolved_started_attempt_is_sealed_as_gap(
+    tmp_path: Path,
+) -> None:
+    path = _database(tmp_path)
+    slot = _slot_for_test(1)
+
+    with CollectorLease.acquire(path) as lease:
+        record_evaluation_attempt_started(
+            lease,
+            experiment_id="exp-1",
+            run_id="run-before-crash",
+            slot=slot,
+            attempt_id="attempt-ambiguous",
+            event_time_utc_ns=100,
+        )
+
+    unresolved = load_unresolved_evaluation_attempts(
+        path,
+        experiment_id="exp-1",
+    )
+
+    assert len(unresolved) == 1
+    assert unresolved[0].slot_id == slot.slot_id
+    assert unresolved[0].attempt_id == "attempt-ambiguous"
+
+    with CollectorLease.acquire(path) as lease:
+        sealed = seal_unresolved_attempts_as_gaps(
+            lease,
+            experiment_id="exp-1",
+            run_id="run-restart",
+            recorded_at_utc_ns=200,
+        )
+
+    assert sealed == (slot.slot_id,)
+
+    bindings = load_population_bindings(
+        path,
+        experiment_id="exp-1",
+    )
+
+    assert len(bindings) == 1
+    assert bindings[0].slot_id == slot.slot_id
+    assert bindings[0].binding_kind == "gap"
+    assert bindings[0].reason == (
+        "startup_recovery_unresolved_evaluation_attempt"
+    )
+
+
+def test_unresolved_retry_cannot_replace_existing_canonical(
+    tmp_path: Path,
+) -> None:
+    path = _database(tmp_path)
+    slot = _slot_for_test(1)
+
+    with sqlite3.connect(path) as con:
+        con.execute("PRAGMA foreign_keys = ON")
+
+        _insert_evaluation_event(
+            con,
+            slot_id=slot.slot_id,
+            event_id="canonical-event",
+            attempt_id="canonical-attempt",
+        )
+
+        con.execute(
+            *build_canonical_population_statement(
+                experiment_id="exp-1",
+                run_id="run-1",
+                slot_id=slot.slot_id,
+                event_id="canonical-event",
+                attempt_id="canonical-attempt",
+                decision=V34Decision.WAIT,
+                captured_ns=123,
+                recorded_at_utc_ns=456,
+            )
+        )
+
+    with CollectorLease.acquire(path) as lease:
+        record_evaluation_attempt_started(
+            lease,
+            experiment_id="exp-1",
+            run_id="run-retry",
+            slot=slot,
+            attempt_id="retry-before-crash",
+            event_time_utc_ns=500,
+        )
+
+    # The unfinished retry is scientifically irrelevant to ownership:
+    # this slot already has an immutable canonical binding.
+    unresolved = load_unresolved_evaluation_attempts(
+        path,
+        experiment_id="exp-1",
+    )
+
+    assert unresolved == ()
+
+    with CollectorLease.acquire(path) as lease:
+        sealed = seal_unresolved_attempts_as_gaps(
+            lease,
+            experiment_id="exp-1",
+            run_id="run-restart",
+            recorded_at_utc_ns=600,
+        )
+
+    assert sealed == ()
+
+    bindings = load_population_bindings(
+        path,
+        experiment_id="exp-1",
+    )
+
+    assert len(bindings) == 1
+    assert bindings[0].binding_kind == "canonical"
+    assert bindings[0].canonical_decision is V34Decision.WAIT
+
+
+def _slot_for_test(index: int):
+    from nautilus_delta_options.research.experiment1.models import (
+        EvaluationSlot,
+    )
+
+    close_ns = index * _STEP
+
+    return EvaluationSlot(
+        slot_id=f"slot-{index}",
+        experiment_id="exp-1",
+        asset="BTC",
+        source_symbol="BTCUSD",
+        candle_open_ns=close_ns - _STEP,
+        candle_close_boundary_ns=close_ns,
+        scheduled_evaluation_boundary_ns=close_ns,
+        endpoint_close_boundary_ns=close_ns + _HORIZON,
+    )
