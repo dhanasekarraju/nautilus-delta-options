@@ -55,6 +55,12 @@ CREATE TABLE experiment_manifest (
 
     CHECK (window_end_utc_ns > window_start_utc_ns),
     CHECK (
+        window_start_utc_ns % 300000000000 = 0
+    ),
+    CHECK (
+        window_end_utc_ns % 300000000000 = 0
+    ),
+    CHECK (
         endpoint_collection_end_utc_ns
         = window_end_utc_ns + 1800000000000
     ),
@@ -88,12 +94,48 @@ CREATE TABLE evaluation_slots (
     ),
 
     CHECK (asset IN ('BTC', 'ETH')),
-    CHECK (candle_close_boundary_ns > candle_open_ns),
+    CHECK (
+        (asset = 'BTC' AND source_symbol = 'BTCUSD')
+        OR
+        (asset = 'ETH' AND source_symbol = 'ETHUSD')
+    ),
+    CHECK (
+        candle_open_ns % 300000000000 = 0
+    ),
+    CHECK (
+        candle_close_boundary_ns % 300000000000 = 0
+    ),
+    CHECK (
+        candle_close_boundary_ns
+        = candle_open_ns + 300000000000
+    ),
+    CHECK (
+        scheduled_evaluation_boundary_ns
+        = candle_close_boundary_ns
+    ),
     CHECK (
         endpoint_close_boundary_ns
         = candle_close_boundary_ns + 1800000000000
     )
 );
+
+CREATE TRIGGER evaluation_slots_validate_manifest_window
+BEFORE INSERT ON evaluation_slots
+WHEN NOT EXISTS (
+    SELECT 1
+    FROM experiment_manifest
+    WHERE experiment_id = NEW.experiment_id
+      AND NEW.candle_close_boundary_ns
+          >= window_start_utc_ns
+      AND NEW.candle_close_boundary_ns
+          < window_end_utc_ns
+)
+BEGIN
+    SELECT RAISE(
+        ABORT,
+        'evaluation slot outside manifest window'
+    );
+END;
 
 CREATE TABLE journal_events (
     sequence INTEGER PRIMARY KEY AUTOINCREMENT,

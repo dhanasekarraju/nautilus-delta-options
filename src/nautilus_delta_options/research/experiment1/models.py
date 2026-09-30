@@ -6,6 +6,14 @@ from typing import Literal
 
 Asset = Literal["BTC", "ETH"]
 
+_RESOLUTION_NS = 300_000_000_000
+_HORIZON_NS = 1_800_000_000_000
+
+_SOURCE_SYMBOL_BY_ASSET = {
+    "BTC": "BTCUSD",
+    "ETH": "ETHUSD",
+}
+
 
 class JournalEventType(StrEnum):
     RUN_STARTED = "run_started"
@@ -32,20 +40,46 @@ class EvaluationSlot:
     def __post_init__(self) -> None:
         if self.asset not in ("BTC", "ETH"):
             raise ValueError("unsupported asset")
-        if not self.source_symbol:
-            raise ValueError("source_symbol must be non-empty")
-        if self.candle_close_boundary_ns <= self.candle_open_ns:
-            raise ValueError("candle close must follow open")
+
+        expected_symbol = _SOURCE_SYMBOL_BY_ASSET[self.asset]
+        if self.source_symbol != expected_symbol:
+            raise ValueError(
+                "source_symbol does not match asset"
+            )
+
         if (
-            self.endpoint_close_boundary_ns
-            != self.candle_close_boundary_ns + 1_800_000_000_000
+            self.candle_open_ns % _RESOLUTION_NS != 0
+            or self.candle_close_boundary_ns % _RESOLUTION_NS != 0
         ):
-            raise ValueError("endpoint must be exactly 30 minutes after signal candle")
+            raise ValueError(
+                "signal candle boundaries must align to five minutes"
+            )
+
+        if (
+            self.candle_close_boundary_ns
+            - self.candle_open_ns
+            != _RESOLUTION_NS
+        ):
+            raise ValueError(
+                "signal candle must span exactly five minutes"
+            )
+
         if (
             self.scheduled_evaluation_boundary_ns
-            < self.candle_close_boundary_ns
+            != self.candle_close_boundary_ns
         ):
-            raise ValueError("evaluation cannot be scheduled before candle close")
+            raise ValueError(
+                "evaluation boundary must equal signal candle close"
+            )
+
+        if (
+            self.endpoint_close_boundary_ns
+            != self.candle_close_boundary_ns + _HORIZON_NS
+        ):
+            raise ValueError(
+                "endpoint must be exactly 30 minutes after "
+                "signal candle"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +123,13 @@ class ExperimentManifest:
             raise ValueError("experiment_id must be non-empty")
         if self.window_end_utc_ns <= self.window_start_utc_ns:
             raise ValueError("window end must follow start")
+        if (
+            self.window_start_utc_ns % _RESOLUTION_NS != 0
+            or self.window_end_utc_ns % _RESOLUTION_NS != 0
+        ):
+            raise ValueError(
+                "experiment window must align to five minutes"
+            )
         if (
             self.endpoint_collection_end_utc_ns
             != self.window_end_utc_ns + 1_800_000_000_000

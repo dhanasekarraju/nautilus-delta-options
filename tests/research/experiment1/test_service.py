@@ -110,10 +110,10 @@ def _seed_manifest_and_slot(
             """,
             (
                 slot.experiment_id,
-                _OPEN_NS,
                 _CLOSE_NS,
-                _CLOSE_NS + 1_800_000_000_000,
-                _CLOSE_NS + 1_860_000_000_000,
+                _CLOSE_NS + 300_000_000_000,
+                _CLOSE_NS + 2_100_000_000_000,
+                _CLOSE_NS + 2_160_000_000_000,
             ),
         )
 

@@ -53,10 +53,10 @@ def _insert_manifest(con: sqlite3.Connection) -> None:
             'protocol-sha',
             'manifest-sha',
             'schedule-sha',
-            1000000000,
-            601000000000,
-            2401000000000,
-            2461000000000,
+            0,
+            600000000000,
+            2400000000000,
+            2460000000000,
             '["BTC","ETH"]',
             '{"BTC":"BTCUSD","ETH":"ETHUSD"}',
             'Delta Exchange India',
@@ -99,10 +99,10 @@ def _insert_slot(con: sqlite3.Connection) -> None:
             'exp-1',
             'BTC',
             'BTCUSD',
-            1000000000,
-            301000000000,
-            301000000000,
-            2101000000000
+            0,
+            300000000000,
+            300000000000,
+            2100000000000
         )
         """
     )
@@ -206,10 +206,10 @@ def test_slot_endpoint_is_exactly_thirty_minutes() -> None:
                 'exp-1',
                 'BTC',
                 'BTCUSD',
-                1000000000,
-                301000000000,
-                301000000000,
-                2100000000000
+                0,
+                300000000000,
+                300000000000,
+                2100000000001
             )
             """
         )
@@ -449,3 +449,173 @@ def test_source_response_is_append_only_and_candle_links_to_it() -> None:
             )
             """
         )
+
+
+
+def test_slot_at_manifest_end_boundary_is_rejected() -> None:
+    con = _database()
+    _insert_manifest(con)
+
+    manifest_row = con.execute(
+        """
+        SELECT window_end_utc_ns
+        FROM experiment_manifest
+        WHERE experiment_id = 'exp-1'
+        """
+    ).fetchone()
+
+    assert manifest_row is not None
+    window_end_ns = int(manifest_row[0])
+
+    with pytest.raises(
+        sqlite3.IntegrityError,
+        match="evaluation slot outside manifest window",
+    ):
+        con.execute(
+            """
+            INSERT INTO evaluation_slots (
+                slot_id,
+                experiment_id,
+                asset,
+                source_symbol,
+                candle_open_ns,
+                candle_close_boundary_ns,
+                scheduled_evaluation_boundary_ns,
+                endpoint_close_boundary_ns
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "slot-at-end",
+                "exp-1",
+                "BTC",
+                "BTCUSD",
+                window_end_ns - 300_000_000_000,
+                window_end_ns,
+                window_end_ns,
+                window_end_ns + 1_800_000_000_000,
+            ),
+        )
+
+
+def test_slot_source_symbol_binding_is_enforced_by_schema() -> None:
+    con = _database()
+    _insert_manifest(con)
+
+    with pytest.raises(sqlite3.IntegrityError):
+        con.execute(
+            """
+            INSERT INTO evaluation_slots (
+                slot_id,
+                experiment_id,
+                asset,
+                source_symbol,
+                candle_open_ns,
+                candle_close_boundary_ns,
+                scheduled_evaluation_boundary_ns,
+                endpoint_close_boundary_ns
+            )
+            VALUES (
+                'bad-source',
+                'exp-1',
+                'BTC',
+                'ETHUSD',
+                0,
+                300000000000,
+                300000000000,
+                2100000000000
+            )
+            """
+        )
+
+
+def test_slot_evaluation_boundary_must_equal_close_in_schema() -> None:
+    con = _database()
+    _insert_manifest(con)
+
+    with pytest.raises(sqlite3.IntegrityError):
+        con.execute(
+            """
+            INSERT INTO evaluation_slots (
+                slot_id,
+                experiment_id,
+                asset,
+                source_symbol,
+                candle_open_ns,
+                candle_close_boundary_ns,
+                scheduled_evaluation_boundary_ns,
+                endpoint_close_boundary_ns
+            )
+            VALUES (
+                'bad-eval-boundary',
+                'exp-1',
+                'BTC',
+                'BTCUSD',
+                0,
+                300000000000,
+                600000000000,
+                2100000000000
+            )
+            """
+        )
+
+
+def test_slot_at_manifest_start_boundary_is_accepted() -> None:
+    con = _database()
+    _insert_manifest(con)
+
+    manifest_row = con.execute(
+        """
+        SELECT window_start_utc_ns
+        FROM experiment_manifest
+        WHERE experiment_id = 'exp-1'
+        """
+    ).fetchone()
+
+    assert manifest_row is not None
+    window_start_ns = int(manifest_row[0])
+
+    con.execute(
+        """
+        INSERT INTO evaluation_slots (
+            slot_id,
+            experiment_id,
+            asset,
+            source_symbol,
+            candle_open_ns,
+            candle_close_boundary_ns,
+            scheduled_evaluation_boundary_ns,
+            endpoint_close_boundary_ns
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "slot-at-start",
+            "exp-1",
+            "BTC",
+            "BTCUSD",
+            window_start_ns - 300_000_000_000,
+            window_start_ns,
+            window_start_ns,
+            window_start_ns + 1_800_000_000_000,
+        ),
+    )
+
+    row = con.execute(
+        """
+        SELECT
+            candle_open_ns,
+            candle_close_boundary_ns,
+            scheduled_evaluation_boundary_ns,
+            endpoint_close_boundary_ns
+        FROM evaluation_slots
+        WHERE slot_id = 'slot-at-start'
+        """
+    ).fetchone()
+
+    assert row == (
+        window_start_ns - 300_000_000_000,
+        window_start_ns,
+        window_start_ns,
+        window_start_ns + 1_800_000_000_000,
+    )

@@ -48,9 +48,9 @@ def build_schedule(
 
     slots: list[EvaluationSlot] = []
 
-    close_boundary_ns = window_start_utc_ns + _RESOLUTION_NS
+    close_boundary_ns = window_start_utc_ns
 
-    while close_boundary_ns <= window_end_utc_ns:
+    while close_boundary_ns < window_end_utc_ns:
         open_ns = close_boundary_ns - _RESOLUTION_NS
 
         for asset in ("BTC", "ETH"):
