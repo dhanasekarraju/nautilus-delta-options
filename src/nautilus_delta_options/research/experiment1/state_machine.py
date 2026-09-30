@@ -57,6 +57,34 @@ class ResearchQualitySelection:
 
 
 @dataclass(frozen=True, slots=True)
+class EvaluationAttemptContext:
+    """Exact frozen evaluator inputs immediately before invocation."""
+
+    underlying: DeltaUnderlying
+    candles: DeltaCandleSnapshot
+    source_option_chain: DeltaOptionChainSnapshot
+    evaluated_option_chain: DeltaOptionChainSnapshot
+    previous_chain: V34ChainState | None
+    as_of: date
+    captured_ns: int
+
+
+EvaluationAttemptStartHook = Callable[
+    [EvaluationAttemptContext],
+    str | None,
+]
+
+EvaluationAttemptFailureHook = Callable[
+    [
+        EvaluationAttemptContext,
+        str,
+        Exception,
+    ],
+    bool | None,
+]
+
+
+@dataclass(frozen=True, slots=True)
 class EvaluationReturn:
     underlying: DeltaUnderlying
     candles: DeltaCandleSnapshot
@@ -66,6 +94,10 @@ class EvaluationReturn:
     signal: V34ShadowSignal
     as_of: date
     captured_ns: int
+
+    # Present only when the pre-evaluator lifecycle hook established
+    # its durable attempt evidence successfully.
+    attempt_id: str | None
 
     # Population ownership is established immediately when the
     # evaluator returns, before evidence persistence and ranking.
@@ -110,6 +142,12 @@ class Experiment1ObserverStateMachine:
         candle_count: int = 240,
         clock_ns: Callable[[], int] = time.time_ns,
         utc_date: Callable[[], date] | None = None,
+        on_evaluation_attempt_start: (
+            EvaluationAttemptStartHook | None
+        ) = None,
+        on_evaluation_attempt_failure: (
+            EvaluationAttemptFailureHook | None
+        ) = None,
         on_evaluation_return: EvaluationReturnHook | None = None,
         population_bindings: Sequence[PopulationBinding] = (),
     ) -> None:
@@ -128,6 +166,33 @@ class Experiment1ObserverStateMachine:
                 "V3.4 shadow requires at least 200 candles"
             )
 
+        if (
+            on_evaluation_attempt_start is not None
+            and on_evaluation_attempt_failure is None
+        ):
+            raise ValueError(
+                "evaluation attempt start hook requires "
+                "a failure hook"
+            )
+
+        if (
+            on_evaluation_attempt_start is not None
+            and on_evaluation_return is None
+        ):
+            raise ValueError(
+                "evaluation attempt start hook requires "
+                "a return hook"
+            )
+
+        if (
+            on_evaluation_attempt_start is None
+            and on_evaluation_attempt_failure is not None
+        ):
+            raise ValueError(
+                "evaluation attempt failure hook requires "
+                "a start hook"
+            )
+
         self._history_client = history_client
         self._delta_client = delta_client
         self._underlyings = tuple(underlyings)
@@ -140,6 +205,12 @@ class Experiment1ObserverStateMachine:
         self._utc_date = (
             utc_date
             or (lambda: datetime.now(UTC).date())
+        )
+        self._on_evaluation_attempt_start = (
+            on_evaluation_attempt_start
+        )
+        self._on_evaluation_attempt_failure = (
+            on_evaluation_attempt_failure
         )
         self._on_evaluation_return = on_evaluation_return
 
@@ -395,7 +466,7 @@ class Experiment1ObserverStateMachine:
         evaluation_returns: list[EvaluationReturn] = []
         evidence_faults: list[str] = []
 
-        # Frozen ordering per asset:
+        # Frozen computational ordering per asset remains:
         #
         # captured_ns
         # -> fresh_chain
@@ -403,9 +474,9 @@ class Experiment1ObserverStateMachine:
         # -> CALL ranking
         # -> PUT ranking
         #
-        # Research evidence is observed immediately after the
-        # evaluator successfully returns, but evidence failure
-        # must never alter frozen state-machine behavior.
+        # Research instrumentation may execute after fresh_chain
+        # and immediately after evaluator return. It has zero
+        # authority over frozen observer rolling state.
         for underlying in self._underlyings:
             source_chain = chains[underlying]
 
@@ -450,6 +521,67 @@ class Experiment1ObserverStateMachine:
                 underlying
             )
 
+            attempt_context = EvaluationAttemptContext(
+                underlying=underlying,
+                candles=candle_by_underlying[underlying],
+                source_option_chain=source_chain,
+                evaluated_option_chain=evaluated_chain,
+                previous_chain=previous_chain,
+                as_of=as_of,
+                captured_ns=captured_ns,
+            )
+
+            population_key = (
+                underlying,
+                candle_by_underlying[
+                    underlying
+                ].candle_close_ms,
+            )
+
+            attempt_id: str | None = None
+            attempt_start_failed = False
+
+            attempt_start_hook = (
+                self._on_evaluation_attempt_start
+            )
+
+            if attempt_start_hook is not None:
+                try:
+                    attempt_id = attempt_start_hook(
+                        attempt_context
+                    )
+
+                    if (
+                        not isinstance(attempt_id, str)
+                        or not attempt_id
+                    ):
+                        attempt_id = None
+                        attempt_start_failed = True
+                        evidence_faults.append(
+                            f"{underlying}: evaluation "
+                            "attempt start rejected"
+                        )
+
+                except Exception as error:
+                    attempt_id = None
+                    attempt_start_failed = True
+                    evidence_faults.append(
+                        f"{underlying}: evaluation "
+                        f"attempt start fault: {error}"
+                    )
+
+            # A failed durable start must never allow a previously
+            # unowned evaluator return to become canonical in this
+            # process. Existing canonical ownership is unaffected.
+            if (
+                attempt_start_failed
+                and population_key
+                not in self._canonical_returns
+            ):
+                self._population_gaps.add(
+                    population_key
+                )
+
             try:
                 signal = evaluate_v34_shadow_signal(
                     candle_by_underlying[underlying],
@@ -460,6 +592,35 @@ class Experiment1ObserverStateMachine:
                     config=self._config,
                 )
             except Exception as error:
+                if attempt_id is not None:
+                    attempt_failure_hook = (
+                        self._on_evaluation_attempt_failure
+                    )
+
+                    if attempt_failure_hook is not None:
+                        try:
+                            accepted = (
+                                attempt_failure_hook(
+                                    attempt_context,
+                                    attempt_id,
+                                    error,
+                                )
+                            )
+
+                            if accepted is False:
+                                evidence_faults.append(
+                                    f"{underlying}: evaluation "
+                                    "attempt failure evidence "
+                                    "rejected"
+                                )
+
+                        except Exception as evidence_error:
+                            evidence_faults.append(
+                                f"{underlying}: evaluation "
+                                "attempt failure evidence "
+                                f"fault: {evidence_error}"
+                            )
+
                 return self._scoring_failure(
                     candle_close_ms=candle_close_ms,
                     failure_stage=(
@@ -477,11 +638,6 @@ class Experiment1ObserverStateMachine:
             # Same frozen ordering: evaluator result exists before
             # quality ranking begins.
             candidate_signals.append(signal)
-
-            population_key = (
-                underlying,
-                signal.candle_close_ms,
-            )
 
             canonical = self._canonical_returns.get(
                 population_key
@@ -544,6 +700,7 @@ class Experiment1ObserverStateMachine:
                 signal=signal,
                 as_of=as_of,
                 captured_ns=captured_ns,
+                attempt_id=attempt_id,
                 population_status=population_status,
                 retry_ordinal=retry_ordinal,
                 canonical_decision=canonical_decision,

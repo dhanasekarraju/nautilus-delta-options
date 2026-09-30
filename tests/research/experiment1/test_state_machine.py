@@ -26,6 +26,7 @@ from nautilus_delta_options.research.experiment1 import (
     state_machine as research_module,
 )
 from nautilus_delta_options.research.experiment1.state_machine import (
+    EvaluationAttemptContext,
     EvaluationReturn,
     Experiment1ObserverStateMachine,
 )
@@ -323,6 +324,8 @@ def _new_research(
     delta: _Delta,
     *,
     hook=None,
+    attempt_start_hook=None,
+    attempt_failure_hook=None,
 ) -> Experiment1ObserverStateMachine:
     del control
 
@@ -331,6 +334,8 @@ def _new_research(
         delta_client=delta,  # type: ignore[arg-type]
         clock_ns=_clock,
         utc_date=lambda: date(2026, 9, 10),
+        on_evaluation_attempt_start=attempt_start_hook,
+        on_evaluation_attempt_failure=attempt_failure_hook,
         on_evaluation_return=hook,
     )
 
@@ -1296,3 +1301,336 @@ def test_recovered_gap_can_never_be_promoted_to_canonical(
     assert btc.retry_ordinal == 0
     assert btc.canonical_decision is None
     assert btc.canonical_captured_ns is None
+
+
+
+def test_attempt_lifecycle_wraps_evaluator_in_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    control = _Control()
+    trace: list[str] = []
+    previous: list[tuple[str, int | None]] = []
+
+    _reset_clock()
+
+    _install_functions(
+        monkeypatch,
+        control=control,
+        trace=trace,
+        previous_seen=previous,
+    )
+
+    def attempt_start(
+        context: EvaluationAttemptContext,
+    ) -> str:
+        trace.append(
+            f"attempt-start:{context.underlying}"
+        )
+        return f"attempt-{context.underlying}"
+
+    def attempt_failure(
+        context: EvaluationAttemptContext,
+        attempt_id: str,
+        error: Exception,
+    ) -> bool:
+        del attempt_id, error
+        trace.append(
+            f"attempt-failure:{context.underlying}"
+        )
+        return True
+
+    def completed(
+        result: EvaluationReturn,
+    ) -> bool:
+        trace.append(
+            f"evidence:{result.underlying}"
+        )
+        return True
+
+    history = _History(control, _C1, trace)
+    delta = _Delta(control, trace)
+
+    observer = _new_research(
+        control,
+        history,
+        delta,
+        hook=completed,
+        attempt_start_hook=attempt_start,
+        attempt_failure_hook=attempt_failure,
+    )
+
+    cycle = observer.run_cycle()
+
+    assert cycle.evaluated is True
+    assert cycle.evidence_faults == ()
+
+    assert trace == [
+        "history:BTC",
+        "history:ETH",
+        "chain:BTC",
+        "chain:ETH",
+        "fresh:BTC",
+        "attempt-start:BTC",
+        "evaluate:BTC",
+        "evidence:BTC",
+        "rank:BTC:call",
+        "rank:BTC:put",
+        "fresh:ETH",
+        "attempt-start:ETH",
+        "evaluate:ETH",
+        "evidence:ETH",
+        "rank:ETH:call",
+        "rank:ETH:put",
+    ]
+
+    assert tuple(
+        result.attempt_id
+        for result in cycle.evaluation_returns
+    ) == (
+        "attempt-BTC",
+        "attempt-ETH",
+    )
+
+
+def test_attempt_start_fault_does_not_block_evaluator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    control = _Control()
+    trace: list[str] = []
+    previous: list[tuple[str, int | None]] = []
+
+    _reset_clock()
+
+    _install_functions(
+        monkeypatch,
+        control=control,
+        trace=trace,
+        previous_seen=previous,
+    )
+
+    def attempt_start(
+        context: EvaluationAttemptContext,
+    ) -> str:
+        trace.append(
+            f"attempt-start:{context.underlying}"
+        )
+
+        if context.underlying == "BTC":
+            raise RuntimeError("synthetic claim failure")
+
+        return "attempt-ETH"
+
+    def attempt_failure(
+        context: EvaluationAttemptContext,
+        attempt_id: str,
+        error: Exception,
+    ) -> bool:
+        del context, attempt_id, error
+        return True
+
+    def completed(
+        result: EvaluationReturn,
+    ) -> bool:
+        trace.append(
+            f"evidence:{result.underlying}"
+        )
+        return True
+
+    history = _History(control, _C1, trace)
+    delta = _Delta(control, trace)
+
+    observer = _new_research(
+        control,
+        history,
+        delta,
+        hook=completed,
+        attempt_start_hook=attempt_start,
+        attempt_failure_hook=attempt_failure,
+    )
+
+    cycle = observer.run_cycle()
+
+    # Research persistence failure has zero frozen state authority.
+    assert cycle.evaluated is True
+    assert len(cycle.signals) == 2
+
+    # Most importantly, evaluator execution still occurred.
+    assert trace.index(
+        "attempt-start:BTC"
+    ) < trace.index(
+        "evaluate:BTC"
+    )
+
+    assert len(cycle.evidence_faults) == 1
+    assert "attempt start fault" in cycle.evidence_faults[0]
+
+    btc, eth = cycle.evaluation_returns
+
+    assert btc.underlying == "BTC"
+    assert btc.attempt_id is None
+    assert btc.population_status == "excluded_by_gap"
+    assert btc.canonical_decision is None
+    assert btc.canonical_captured_ns is None
+
+    assert eth.underlying == "ETH"
+    assert eth.attempt_id == "attempt-ETH"
+    assert eth.population_status == "canonical"
+
+
+def test_evaluator_failure_closes_successful_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    control = _Control(stage="btc_evaluation")
+    trace: list[str] = []
+    previous: list[tuple[str, int | None]] = []
+
+    _reset_clock()
+
+    _install_functions(
+        monkeypatch,
+        control=control,
+        trace=trace,
+        previous_seen=previous,
+    )
+
+    def attempt_start(
+        context: EvaluationAttemptContext,
+    ) -> str:
+        trace.append(
+            f"attempt-start:{context.underlying}"
+        )
+        return f"attempt-{context.underlying}"
+
+    def attempt_failure(
+        context: EvaluationAttemptContext,
+        attempt_id: str,
+        error: Exception,
+    ) -> bool:
+        assert attempt_id == "attempt-BTC"
+        assert str(error) == "btc_evaluation"
+
+        trace.append(
+            f"attempt-failure:{context.underlying}"
+        )
+        return True
+
+    def completed(
+        result: EvaluationReturn,
+    ) -> bool:
+        trace.append(
+            f"evidence:{result.underlying}"
+        )
+        return True
+
+    history = _History(control, _C1, trace)
+    delta = _Delta(control, trace)
+
+    observer = _new_research(
+        control,
+        history,
+        delta,
+        hook=completed,
+        attempt_start_hook=attempt_start,
+        attempt_failure_hook=attempt_failure,
+    )
+
+    cycle = observer.run_cycle()
+
+    assert cycle.evaluated is False
+    assert cycle.failure_stage == "btc_evaluation"
+    assert cycle.evaluation_returns == ()
+    assert cycle.evidence_faults == ()
+
+    assert trace == [
+        "history:BTC",
+        "history:ETH",
+        "chain:BTC",
+        "chain:ETH",
+        "fresh:BTC",
+        "attempt-start:BTC",
+        "evaluate:BTC",
+        "attempt-failure:BTC",
+    ]
+
+
+def test_attempt_failure_evidence_fault_has_zero_state_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    control = _Control(stage="btc_evaluation")
+    trace: list[str] = []
+    previous: list[tuple[str, int | None]] = []
+
+    _reset_clock()
+
+    _install_functions(
+        monkeypatch,
+        control=control,
+        trace=trace,
+        previous_seen=previous,
+    )
+
+    def attempt_start(
+        context: EvaluationAttemptContext,
+    ) -> str:
+        return f"attempt-{context.underlying}"
+
+    def attempt_failure(
+        context: EvaluationAttemptContext,
+        attempt_id: str,
+        error: Exception,
+    ) -> bool:
+        del context, attempt_id, error
+        raise RuntimeError("synthetic terminal failure")
+
+    def completed(
+        result: EvaluationReturn,
+    ) -> bool:
+        del result
+        return True
+
+    history = _History(control, _C1, trace)
+    delta = _Delta(control, trace)
+
+    observer = _new_research(
+        control,
+        history,
+        delta,
+        hook=completed,
+        attempt_start_hook=attempt_start,
+        attempt_failure_hook=attempt_failure,
+    )
+
+    cycle = observer.run_cycle()
+
+    assert cycle.evaluated is False
+    assert cycle.failure_stage == "btc_evaluation"
+    assert cycle.evaluation_returns == ()
+
+    assert len(cycle.evidence_faults) == 1
+    assert (
+        "attempt failure evidence fault"
+        in cycle.evidence_faults[0]
+    )
+
+
+def test_attempt_start_requires_terminal_hooks() -> None:
+    control = _Control()
+    trace: list[str] = []
+
+    history = _History(control, _C1, trace)
+    delta = _Delta(control, trace)
+
+    def attempt_start(
+        context: EvaluationAttemptContext,
+    ) -> str:
+        return f"attempt-{context.underlying}"
+
+    with pytest.raises(
+        ValueError,
+        match="requires a failure hook",
+    ):
+        Experiment1ObserverStateMachine(
+            history_client=history,  # type: ignore[arg-type]
+            delta_client=delta,  # type: ignore[arg-type]
+            on_evaluation_attempt_start=attempt_start,
+        )
