@@ -164,6 +164,9 @@ CREATE TABLE journal_events (
     CHECK (
         event_type IN (
             'run_started',
+            'observer_cycle_started',
+            'observer_cycle_completed',
+            'observer_cycle_aborted',
             'evaluation_started',
             'evaluation_completed',
             'evaluation_failed',

@@ -17,6 +17,9 @@ _SOURCE_SYMBOL_BY_ASSET = {
 
 class JournalEventType(StrEnum):
     RUN_STARTED = "run_started"
+    OBSERVER_CYCLE_STARTED = "observer_cycle_started"
+    OBSERVER_CYCLE_COMPLETED = "observer_cycle_completed"
+    OBSERVER_CYCLE_ABORTED = "observer_cycle_aborted"
     EVALUATION_STARTED = "evaluation_started"
     EVALUATION_COMPLETED = "evaluation_completed"
     EVALUATION_FAILED = "evaluation_failed"
