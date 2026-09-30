@@ -177,6 +177,11 @@ def load_last_committed_observer_state(
         ).fetchone()
 
         if cycle_row is None:
+            _assert_no_post_commit_ambiguity(
+                con,
+                experiment_id=experiment_id,
+                committed_boundary_ns=None,
+            )
             return None
 
         cycle_event_id = str(cycle_row[0])
@@ -369,6 +374,12 @@ def load_last_committed_observer_state(
                 )
             )
 
+        _assert_no_post_commit_ambiguity(
+            con,
+            experiment_id=experiment_id,
+            committed_boundary_ns=boundary_ns,
+        )
+
     if set(chains_by_underlying) != set(expected):
         raise RuntimeError(
             "completed cycle is missing configured underlying state"
@@ -382,6 +393,250 @@ def load_last_committed_observer_state(
             for underlying in expected
         ),
     )
+
+
+def _assert_no_post_commit_ambiguity(
+    con: sqlite3.Connection,
+    *,
+    experiment_id: str,
+    committed_boundary_ns: int | None,
+) -> None:
+    """Fail closed when a crashed process may have advanced RAM state."""
+
+    if committed_boundary_ns is None:
+        boundary_predicate = ""
+        boundary_params: tuple[object, ...] = (
+            experiment_id,
+        )
+    else:
+        boundary_predicate = (
+            " AND slot.candle_close_boundary_ns > ?"
+        )
+        boundary_params = (
+            experiment_id,
+            committed_boundary_ns,
+        )
+
+    unresolved_rows = con.execute(
+        f"""
+        SELECT
+            started.attempt_id,
+            slot.asset,
+            slot.candle_close_boundary_ns
+        FROM journal_events AS started
+        JOIN evaluation_slots AS slot
+          ON slot.slot_id = started.slot_id
+        WHERE started.experiment_id = ?
+          AND started.event_type = 'evaluation_started'
+          {boundary_predicate}
+          AND NOT EXISTS (
+              SELECT 1
+              FROM journal_events AS terminal
+              WHERE terminal.experiment_id
+                    = started.experiment_id
+                AND terminal.attempt_id
+                    = started.attempt_id
+                AND terminal.event_type IN (
+                    'evaluation_completed',
+                    'evaluation_failed'
+                )
+          )
+        ORDER BY
+            slot.candle_close_boundary_ns,
+            slot.asset,
+            started.sequence
+        """,
+        boundary_params,
+    ).fetchall()
+
+    if unresolved_rows:
+        attempt_id = str(unresolved_rows[0][0])
+        asset = str(unresolved_rows[0][1])
+        boundary_ns = int(unresolved_rows[0][2])
+
+        raise RuntimeError(
+            "rolling-state recovery is ambiguous: "
+            "unresolved evaluation_started exists after "
+            "the last durable committed cycle "
+            f"(attempt_id={attempt_id}, "
+            f"asset={asset}, "
+            f"boundary_ns={boundary_ns})"
+        )
+
+    aborted_refs = _load_aborted_evaluation_refs(
+        con,
+        experiment_id=experiment_id,
+    )
+
+    if committed_boundary_ns is None:
+        completed_predicate = ""
+        completed_params: tuple[object, ...] = (
+            experiment_id,
+        )
+    else:
+        completed_predicate = (
+            " AND slot.candle_close_boundary_ns > ?"
+        )
+        completed_params = (
+            experiment_id,
+            committed_boundary_ns,
+        )
+
+    completed_rows = con.execute(
+        f"""
+        SELECT
+            event.event_id,
+            event.run_id,
+            slot.asset,
+            slot.candle_close_boundary_ns
+        FROM journal_events AS event
+        JOIN evaluation_slots AS slot
+          ON slot.slot_id = event.slot_id
+        WHERE event.experiment_id = ?
+          AND event.event_type = 'evaluation_completed'
+          {completed_predicate}
+        ORDER BY
+            slot.candle_close_boundary_ns,
+            slot.asset,
+            event.sequence
+        """,
+        completed_params,
+    ).fetchall()
+
+    for row in completed_rows:
+        event_id = str(row[0])
+        run_id = str(row[1])
+        asset = str(row[2])
+        boundary_ns = int(row[3])
+
+        terminal = aborted_refs.get(event_id)
+
+        if terminal is None:
+            raise RuntimeError(
+                "rolling-state recovery is ambiguous: "
+                "evaluation_completed exists after the last "
+                "durable committed cycle without a durable "
+                "observer_cycle_aborted terminal "
+                f"(event_id={event_id}, "
+                f"asset={asset}, "
+                f"boundary_ns={boundary_ns})"
+            )
+
+        terminal_run_id, terminal_boundary_ns = terminal
+
+        if terminal_run_id != run_id:
+            raise RuntimeError(
+                "aborted cycle references evaluation from "
+                "a different run"
+            )
+
+        if terminal_boundary_ns != boundary_ns:
+            raise RuntimeError(
+                "aborted cycle boundary differs from "
+                "referenced evaluation"
+            )
+
+
+def _load_aborted_evaluation_refs(
+    con: sqlite3.Connection,
+    *,
+    experiment_id: str,
+) -> dict[str, tuple[str, int]]:
+    rows = con.execute(
+        """
+        SELECT
+            run_id,
+            payload_json,
+            payload_sha256
+        FROM journal_events
+        WHERE experiment_id = ?
+          AND event_type = 'observer_cycle_aborted'
+        ORDER BY sequence
+        """,
+        (experiment_id,),
+    ).fetchall()
+
+    refs: dict[str, tuple[str, int]] = {}
+
+    for row in rows:
+        run_id = str(row[0])
+        payload_json = str(row[1])
+
+        _verify_payload_hash(
+            payload_json,
+            str(row[2]),
+            label="aborted observer cycle",
+        )
+
+        payload = _json_object(
+            payload_json,
+            label="aborted observer cycle",
+        )
+
+        if payload.get("status") != "aborted":
+            raise RuntimeError(
+                "aborted cycle event has invalid status"
+            )
+
+        if payload.get("state_committed") is not False:
+            raise RuntimeError(
+                "aborted cycle event incorrectly marks state committed"
+            )
+
+        boundary_value = payload.get(
+            "candle_close_boundary_ns"
+        )
+
+        if boundary_value is None:
+            # A pre-evaluation failure can legitimately have no
+            # resolved candle boundary and therefore no returned
+            # evaluation event IDs.
+            boundary_ns: int | None = None
+        elif (
+            isinstance(boundary_value, bool)
+            or not isinstance(boundary_value, int)
+        ):
+            raise RuntimeError(
+                "aborted cycle candle boundary must be an integer or null"
+            )
+        else:
+            boundary_ns = boundary_value
+
+        raw_event_ids = payload.get(
+            "evaluation_event_ids"
+        )
+
+        if not isinstance(raw_event_ids, list):
+            raise RuntimeError(
+                "aborted cycle evaluation_event_ids must be a list"
+            )
+
+        if raw_event_ids and boundary_ns is None:
+            raise RuntimeError(
+                "aborted cycle with evaluator returns "
+                "must have a candle boundary"
+            )
+
+        for value in raw_event_ids:
+            if not isinstance(value, str) or not value:
+                raise RuntimeError(
+                    "aborted cycle contains invalid evaluation event id"
+                )
+
+            if value in refs:
+                raise RuntimeError(
+                    "evaluation event is referenced by multiple "
+                    "aborted cycles"
+                )
+
+            assert boundary_ns is not None
+
+            refs[value] = (
+                run_id,
+                boundary_ns,
+            )
+
+    return refs
 
 
 def _verify_payload_hash(
