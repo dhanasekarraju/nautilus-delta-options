@@ -25,6 +25,9 @@ from nautilus_delta_options.paper.v34_shadow import (
 from nautilus_delta_options.research.experiment1 import (
     state_machine as research_module,
 )
+from nautilus_delta_options.research.experiment1.rolling_state import (
+    RecoveredObserverState,
+)
 from nautilus_delta_options.research.experiment1.state_machine import (
     EvaluationAttemptContext,
     EvaluationReturn,
@@ -1633,4 +1636,121 @@ def test_attempt_start_requires_terminal_hooks() -> None:
             history_client=history,  # type: ignore[arg-type]
             delta_client=delta,  # type: ignore[arg-type]
             on_evaluation_attempt_start=attempt_start,
+        )
+
+
+
+def test_recovered_rolling_state_restores_duplicate_boundary_guard() -> None:
+    control = _Control()
+    trace: list[str] = []
+
+    history = _History(
+        control,
+        _C1,
+        trace,
+    )
+    delta = _Delta(
+        control,
+        trace,
+    )
+
+    candle_close_ms = _candles(
+        "BTC",
+        _C1,
+    ).candle_close_ms
+
+    boundary_ns = (
+        candle_close_ms + 1
+    ) * 1_000_000
+
+    btc = V34ChainState(
+        underlying="BTC",
+        captured_ns=111,
+        contracts=(),
+    )
+
+    eth = V34ChainState(
+        underlying="ETH",
+        captured_ns=222,
+        contracts=(),
+    )
+
+    observer = Experiment1ObserverStateMachine(
+        history_client=history,
+        delta_client=delta,
+        recovered_rolling_state=(
+            RecoveredObserverState(
+                cycle_event_id="cycle-event",
+                candle_close_boundary_ns=boundary_ns,
+                chains=(
+                    btc,
+                    eth,
+                ),
+            )
+        ),
+    )
+
+    assert (
+        observer.last_candle_close_ms
+        == candle_close_ms
+    )
+    assert observer.previous_chain("BTC") == btc
+    assert observer.previous_chain("ETH") == eth
+
+    cycle = observer.run_cycle()
+
+    assert cycle.evaluated is False
+    assert (
+        cycle.failure_stage
+        == "duplicate_boundary"
+    )
+
+    assert trace == [
+        "history:BTC",
+        "history:ETH",
+    ]
+
+
+def test_recovered_rolling_state_requires_all_configured_assets() -> None:
+    control = _Control()
+    trace: list[str] = []
+
+    history = _History(
+        control,
+        _C1,
+        trace,
+    )
+    delta = _Delta(
+        control,
+        trace,
+    )
+
+    candle_close_ms = _candles(
+        "BTC",
+        _C1,
+    ).candle_close_ms
+
+    with pytest.raises(
+        ValueError,
+        match="exactly the configured underlyings",
+    ):
+        Experiment1ObserverStateMachine(
+            history_client=history,
+            delta_client=delta,
+            recovered_rolling_state=(
+                RecoveredObserverState(
+                    cycle_event_id="cycle-event",
+                    candle_close_boundary_ns=(
+                        candle_close_ms + 1
+                    )
+                    * 1_000_000,
+                    chains=(
+                        V34ChainState(
+                            underlying="BTC",
+                            captured_ns=111,
+                            contracts=(),
+                        ),
+                    ),
+                )
+            ),
         )

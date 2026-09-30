@@ -16,6 +16,9 @@ from nautilus_delta_options.research.experiment1.population import (
     PopulationBinding,
     PopulationStatus,
 )
+from nautilus_delta_options.research.experiment1.rolling_state import (
+    RecoveredObserverState,
+)
 from nautilus_delta_options.selection.v34_quality import (
     V34ContractQuality,
     V34QualityConfig,
@@ -150,6 +153,7 @@ class Experiment1ObserverStateMachine:
         ) = None,
         on_evaluation_return: EvaluationReturnHook | None = None,
         population_bindings: Sequence[PopulationBinding] = (),
+        recovered_rolling_state: RecoveredObserverState | None = None,
     ) -> None:
         if not underlyings:
             raise ValueError(
@@ -221,6 +225,10 @@ class Experiment1ObserverStateMachine:
 
         self._last_candle_close_ms: int | None = None
 
+        self._hydrate_rolling_state(
+            recovered_rolling_state
+        )
+
         # First actual successful evaluator return owns the
         # Experiment 1 population identity for (asset, candle).
         #
@@ -247,6 +255,56 @@ class Experiment1ObserverStateMachine:
 
         self._hydrate_population_bindings(
             population_bindings
+        )
+
+    def _hydrate_rolling_state(
+        self,
+        recovered: RecoveredObserverState | None,
+    ) -> None:
+        """Restore the latest durably committed frozen observer state."""
+
+        if recovered is None:
+            return
+
+        if len(recovered.chains) != len(self._underlyings):
+            raise ValueError(
+                "recovered rolling state must contain exactly "
+                "the configured underlyings"
+            )
+
+        expected = set(self._underlyings)
+
+        recovered_chains: dict[
+            DeltaUnderlying,
+            V34ChainState,
+        ] = {}
+
+        for chain in recovered.chains:
+            underlying = cast(
+                DeltaUnderlying,
+                chain.underlying,
+            )
+
+            if underlying not in expected:
+                raise ValueError(
+                    "recovered rolling-state asset is not configured"
+                )
+
+            if underlying in recovered_chains:
+                raise ValueError(
+                    "duplicate recovered rolling-state asset"
+                )
+
+            recovered_chains[underlying] = chain
+
+        if set(recovered_chains) != expected:
+            raise ValueError(
+                "recovered rolling state is missing a configured asset"
+            )
+
+        self._previous_chains = recovered_chains
+        self._last_candle_close_ms = (
+            recovered.candle_close_ms
         )
 
     def _hydrate_population_bindings(
