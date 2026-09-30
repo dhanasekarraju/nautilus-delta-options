@@ -8,6 +8,13 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from nautilus_delta_options.research.experiment1.schema_identity import (
+    SchemaExpectation,
+    build_schema_expectation,
+    initialize_new_database_identity,
+    validate_database_identity,
+)
+
 SqlParam = str | int | float | bytes | None
 type JournalStatement = tuple[str, tuple[SqlParam, ...]]
 
@@ -39,6 +46,7 @@ class ExperimentJournal:
         batch_size: int = 64,
         flush_interval_seconds: float = 0.250,
         busy_timeout_ms: int = 250,
+        create_new: bool = False,
         start_immediately: bool = True,
     ) -> None:
         if max_queue_items <= 0:
@@ -57,6 +65,7 @@ class ExperimentJournal:
         self._batch_size = batch_size
         self._flush_interval_seconds = flush_interval_seconds
         self._busy_timeout_ms = busy_timeout_ms
+        self._create_new = create_new
 
         self._queue: queue.Queue[_WriteEnvelope | None] = queue.Queue(
             maxsize=max_queue_items
@@ -210,29 +219,88 @@ class ExperimentJournal:
             return self._fatal_error is None
 
     def _prepare_database(self) -> None:
+        schema_path = Path(__file__).with_name("schema.sql")
+        expectation = build_schema_expectation(schema_path)
+
+        if self._database_path.exists():
+            if self._create_new:
+                raise RuntimeError(
+                    "refusing to create Experiment 1 journal: "
+                    "database path already exists"
+                )
+
+            if not self._database_path.is_file():
+                raise RuntimeError(
+                    "existing Experiment 1 journal path is not a file"
+                )
+
+            if self._database_path.stat().st_size == 0:
+                raise RuntimeError(
+                    "existing Experiment 1 journal database is empty"
+                )
+
+            self._validate_existing_read_only(expectation)
+            self._activate_existing_database(expectation)
+            return
+
+        if not self._create_new:
+            raise FileNotFoundError(
+                "Experiment 1 journal database does not exist; "
+                "creation requires create_new=True"
+            )
+
         self._database_path.parent.mkdir(
             parents=True,
             exist_ok=True,
         )
 
-        schema_path = Path(__file__).with_name("schema.sql")
-        schema = schema_path.read_text(encoding="utf-8")
+        self._create_new_database(expectation)
 
-        required_tables = {
-            "experiment_manifest",
-            "evaluation_slots",
-            "journal_events",
-            "source_responses",
-            "candle_observations",
-            "evaluation_candle_inputs",
-            "signal_endpoints",
-        }
-        required_triggers = {
-            f"{table}_{operation}"
-            for table in required_tables
-            for operation in ("no_update", "no_delete")
-        }
+    def _validate_existing_read_only(
+        self,
+        expectation: SchemaExpectation,
+    ) -> None:
+        uri = self._database_path.resolve().as_uri() + "?mode=ro"
 
+        with sqlite3.connect(
+            uri,
+            uri=True,
+            timeout=self._busy_timeout_ms / 1000,
+        ) as con:
+            validate_database_identity(
+                con,
+                expectation,
+            )
+
+    def _activate_existing_database(
+        self,
+        expectation: SchemaExpectation,
+    ) -> None:
+        uri = self._database_path.resolve().as_uri() + "?mode=rw"
+
+        with sqlite3.connect(
+            uri,
+            uri=True,
+            timeout=self._busy_timeout_ms / 1000,
+        ) as con:
+            # Revalidate after the read-only preflight and before any
+            # persistent connection setting is changed.
+            validate_database_identity(
+                con,
+                expectation,
+            )
+
+            con.execute("PRAGMA foreign_keys = ON")
+            con.execute(
+                f"PRAGMA busy_timeout = {self._busy_timeout_ms}"
+            )
+            con.execute("PRAGMA journal_mode = WAL")
+            con.execute("PRAGMA synchronous = FULL")
+
+    def _create_new_database(
+        self,
+        expectation: SchemaExpectation,
+    ) -> None:
         with sqlite3.connect(
             self._database_path,
             timeout=self._busy_timeout_ms / 1000,
@@ -241,59 +309,23 @@ class ExperimentJournal:
             con.execute(
                 f"PRAGMA busy_timeout = {self._busy_timeout_ms}"
             )
+
+            con.executescript(expectation.schema_sql)
+
+            initialize_new_database_identity(
+                con,
+                expectation,
+                created_at_utc_ns=time.time_ns(),
+            )
+            con.commit()
+
+            validate_database_identity(
+                con,
+                expectation,
+            )
+
             con.execute("PRAGMA journal_mode = WAL")
             con.execute("PRAGMA synchronous = FULL")
-
-            existing_tables = {
-                str(row[0])
-                for row in con.execute(
-                    """
-                    SELECT name
-                    FROM sqlite_master
-                    WHERE type = 'table'
-                      AND name NOT LIKE 'sqlite_%'
-                    """
-                )
-            }
-
-            if not existing_tables:
-                con.executescript(schema)
-                return
-
-            missing_tables = required_tables - existing_tables
-
-            existing_triggers = {
-                str(row[0])
-                for row in con.execute(
-                    """
-                    SELECT name
-                    FROM sqlite_master
-                    WHERE type = 'trigger'
-                    """
-                )
-            }
-            missing_triggers = required_triggers - existing_triggers
-
-            if missing_tables or missing_triggers:
-                problems: list[str] = []
-
-                if missing_tables:
-                    problems.append(
-                        "missing tables: "
-                        + ", ".join(sorted(missing_tables))
-                    )
-
-                if missing_triggers:
-                    problems.append(
-                        "missing triggers: "
-                        + ", ".join(sorted(missing_triggers))
-                    )
-
-                raise RuntimeError(
-                    "existing Experiment 1 journal schema is "
-                    "incomplete or incompatible: "
-                    + "; ".join(problems)
-                )
 
     def _writer_main(self) -> None:
         con: sqlite3.Connection | None = None

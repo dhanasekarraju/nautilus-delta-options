@@ -368,6 +368,7 @@ def test_completed_evaluation_is_persisted_as_one_atomic_envelope(
 
     journal = ExperimentJournal(
         database_path,
+        create_new=True,
         start_immediately=False,
     )
 
@@ -517,6 +518,7 @@ def test_evaluation_validation_fails_before_queue_admission(
 
     journal = ExperimentJournal(
         database_path,
+        create_new=True,
         start_immediately=False,
     )
 
@@ -570,6 +572,7 @@ def test_evaluation_envelope_rejection_persists_nothing(
 
     journal = ExperimentJournal(
         database_path,
+        create_new=True,
         max_queue_bytes=1,
         start_immediately=False,
     )

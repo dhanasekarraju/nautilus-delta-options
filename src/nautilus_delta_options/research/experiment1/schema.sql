@@ -1,5 +1,22 @@
 PRAGMA foreign_keys = ON;
 
+CREATE TABLE journal_schema_identity (
+    identity_id INTEGER PRIMARY KEY,
+
+    application_id TEXT NOT NULL,
+    schema_version INTEGER NOT NULL,
+    schema_sql_sha256 TEXT NOT NULL,
+    schema_descriptor_sha256 TEXT NOT NULL,
+    serialization_version INTEGER NOT NULL,
+    created_at_utc_ns INTEGER NOT NULL,
+
+    CHECK (identity_id = 1),
+    CHECK (schema_version > 0),
+    CHECK (serialization_version > 0),
+    CHECK (length(schema_sql_sha256) = 64),
+    CHECK (length(schema_descriptor_sha256) = 64)
+);
+
 CREATE TABLE experiment_manifest (
     experiment_id TEXT PRIMARY KEY,
     protocol_version TEXT NOT NULL,
@@ -388,3 +405,22 @@ BEFORE DELETE ON signal_endpoints
 BEGIN
     SELECT RAISE(ABORT, 'signal_endpoints is append-only');
 END;
+
+CREATE TRIGGER journal_schema_identity_no_update
+BEFORE UPDATE ON journal_schema_identity
+BEGIN
+    SELECT RAISE(
+        ABORT,
+        'journal_schema_identity is append-only'
+    );
+END;
+
+CREATE TRIGGER journal_schema_identity_no_delete
+BEFORE DELETE ON journal_schema_identity
+BEGIN
+    SELECT RAISE(
+        ABORT,
+        'journal_schema_identity is append-only'
+    );
+END;
+
