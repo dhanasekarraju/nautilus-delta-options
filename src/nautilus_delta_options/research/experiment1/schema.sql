@@ -315,6 +315,106 @@ CREATE TABLE evaluation_candle_inputs (
     CHECK (ordinal >= 0)
 );
 
+
+CREATE TABLE population_bindings (
+    slot_id TEXT PRIMARY KEY,
+    experiment_id TEXT NOT NULL,
+    recorded_run_id TEXT NOT NULL,
+
+    binding_kind TEXT NOT NULL,
+
+    canonical_event_id TEXT UNIQUE,
+    canonical_attempt_id TEXT,
+    canonical_decision TEXT,
+    canonical_captured_ns INTEGER,
+
+    reason TEXT,
+    recorded_at_utc_ns INTEGER NOT NULL,
+
+    FOREIGN KEY (experiment_id)
+        REFERENCES experiment_manifest(experiment_id),
+
+    FOREIGN KEY (slot_id)
+        REFERENCES evaluation_slots(slot_id),
+
+    FOREIGN KEY (canonical_event_id)
+        REFERENCES journal_events(event_id),
+
+    CHECK (
+        binding_kind IN (
+            'canonical',
+            'gap'
+        )
+    ),
+
+    CHECK (
+        (
+            binding_kind = 'canonical'
+            AND canonical_event_id IS NOT NULL
+            AND canonical_attempt_id IS NOT NULL
+            AND canonical_decision IN (
+                'wait',
+                'call',
+                'put'
+            )
+            AND canonical_captured_ns IS NOT NULL
+            AND canonical_captured_ns > 0
+            AND reason IS NULL
+        )
+        OR
+        (
+            binding_kind = 'gap'
+            AND canonical_event_id IS NULL
+            AND canonical_attempt_id IS NULL
+            AND canonical_decision IS NULL
+            AND canonical_captured_ns IS NULL
+            AND reason IS NOT NULL
+            AND length(reason) > 0
+        )
+    )
+);
+
+CREATE INDEX population_bindings_experiment_idx
+    ON population_bindings (
+        experiment_id,
+        binding_kind,
+        slot_id
+    );
+
+CREATE TRIGGER population_bindings_validate_slot
+BEFORE INSERT ON population_bindings
+WHEN NOT EXISTS (
+    SELECT 1
+    FROM evaluation_slots
+    WHERE slot_id = NEW.slot_id
+      AND experiment_id = NEW.experiment_id
+)
+BEGIN
+    SELECT RAISE(
+        ABORT,
+        'population binding does not match evaluation slot'
+    );
+END;
+
+CREATE TRIGGER population_bindings_validate_canonical_event
+BEFORE INSERT ON population_bindings
+WHEN NEW.binding_kind = 'canonical'
+ AND NOT EXISTS (
+    SELECT 1
+    FROM journal_events
+    WHERE event_id = NEW.canonical_event_id
+      AND experiment_id = NEW.experiment_id
+      AND slot_id = NEW.slot_id
+      AND attempt_id = NEW.canonical_attempt_id
+      AND event_type = 'evaluation_completed'
+)
+BEGIN
+    SELECT RAISE(
+        ABORT,
+        'canonical population binding does not match evaluation event'
+    );
+END;
+
 CREATE TABLE signal_endpoints (
     endpoint_id TEXT PRIMARY KEY,
 
@@ -431,6 +531,25 @@ CREATE TRIGGER evaluation_candle_inputs_no_delete
 BEFORE DELETE ON evaluation_candle_inputs
 BEGIN
     SELECT RAISE(ABORT, 'evaluation_candle_inputs is append-only');
+END;
+
+
+CREATE TRIGGER population_bindings_no_update
+BEFORE UPDATE ON population_bindings
+BEGIN
+    SELECT RAISE(
+        ABORT,
+        'population_bindings is append-only'
+    );
+END;
+
+CREATE TRIGGER population_bindings_no_delete
+BEFORE DELETE ON population_bindings
+BEGIN
+    SELECT RAISE(
+        ABORT,
+        'population_bindings is append-only'
+    );
 END;
 
 CREATE TRIGGER signal_endpoints_no_update

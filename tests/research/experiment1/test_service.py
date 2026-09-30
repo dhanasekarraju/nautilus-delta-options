@@ -385,6 +385,8 @@ def test_completed_evaluation_is_persisted_as_one_atomic_envelope(
         run_id="run-1",
         slot=slot,
         attempt_id="attempt-1",
+        population_status="canonical",
+        retry_ordinal=0,
         history=history,
         option_chain=option_chain,
         evaluated_option_chain=option_chain.snapshot,
@@ -459,6 +461,20 @@ def test_completed_evaluation_is_persisted_as_one_atomic_envelope(
             (refs.event_id,),
         ).fetchone()
 
+        population_binding = con.execute(
+            """
+            SELECT
+                binding_kind,
+                canonical_event_id,
+                canonical_attempt_id,
+                canonical_decision,
+                canonical_captured_ns
+            FROM population_bindings
+            WHERE slot_id = ?
+            """,
+            (slot.slot_id,),
+        ).fetchone()
+
     assert [row[0] for row in responses] == [
         "history",
         "option_chain",
@@ -480,6 +496,14 @@ def test_completed_evaluation_is_persisted_as_one_atomic_envelope(
 
     assert event is not None
     assert event[0] == "evaluation_completed"
+
+    assert population_binding == (
+        "canonical",
+        refs.event_id,
+        "attempt-1",
+        "call",
+        signal.chain_state.captured_ns,
+    )
 
     payload = json.loads(event[1])
 
@@ -505,6 +529,12 @@ def test_completed_evaluation_is_persisted_as_one_atomic_envelope(
 
     assert payload["candle_input_count"] == 2
     assert payload["p0_observation_id"] == refs.p0_observation_id
+    assert payload["population_status"] == "canonical"
+    assert payload["retry_ordinal"] == 0
+    assert payload["canonical_decision"] == "call"
+    assert payload["canonical_captured_ns"] == (
+        signal.chain_state.captured_ns
+    )
 
     assert event[2] == hashlib.sha256(
         event[1].encode("utf-8")
@@ -549,6 +579,8 @@ def test_evaluation_validation_fails_before_queue_admission(
             run_id="run-1",
             slot=bad_slot,
             attempt_id="attempt-1",
+            population_status="canonical",
+            retry_ordinal=0,
             history=_history(),
             option_chain=option_chain,
             evaluated_option_chain=option_chain.snapshot,
@@ -587,6 +619,8 @@ def test_evaluation_envelope_rejection_persists_nothing(
         run_id="run-1",
         slot=slot,
         attempt_id="attempt-1",
+        population_status="canonical",
+        retry_ordinal=0,
         history=_history(),
         option_chain=option_chain,
         evaluated_option_chain=option_chain.snapshot,
@@ -617,7 +651,130 @@ def test_evaluation_envelope_rejection_persists_nothing(
         assert con.execute(
             "SELECT COUNT(*) FROM journal_events"
         ).fetchone()[0] == 0
+        assert con.execute(
+            "SELECT COUNT(*) FROM population_bindings"
+        ).fetchone()[0] == 0
 
+
+
+
+def test_retry_evidence_does_not_replace_canonical_binding(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "observations.sqlite"
+
+    journal = ExperimentJournal(
+        database_path,
+        create_new=True,
+        start_immediately=False,
+    )
+
+    slot = _slot()
+    _seed_manifest_and_slot(database_path, slot)
+
+    history = _history()
+    option_chain = _option_chain()
+    signal = _signal()
+
+    canonical_refs = enqueue_completed_evaluation(
+        journal,
+        experiment_id="exp-1",
+        run_id="run-1",
+        slot=slot,
+        attempt_id="attempt-1",
+        population_status="canonical",
+        retry_ordinal=0,
+        history=history,
+        option_chain=option_chain,
+        evaluated_option_chain=option_chain.snapshot,
+        signal=signal,
+        previous_chain=None,
+        config=V34Config(),
+        as_of=date(2026, 9, 28),
+        event_time_utc_ns=1_900_000_000_500_000_000,
+    )
+
+    assert canonical_refs is not None
+
+    retry_refs = enqueue_completed_evaluation(
+        journal,
+        experiment_id="exp-1",
+        run_id="run-1",
+        slot=slot,
+        attempt_id="attempt-2",
+        population_status="same_decision_retry",
+        retry_ordinal=1,
+        history=history,
+        option_chain=option_chain,
+        evaluated_option_chain=option_chain.snapshot,
+        signal=signal,
+        previous_chain=None,
+        config=V34Config(),
+        as_of=date(2026, 9, 28),
+        event_time_utc_ns=1_900_000_000_600_000_000,
+        canonical_decision=signal.decision,
+        canonical_captured_ns=signal.chain_state.captured_ns,
+    )
+
+    assert retry_refs is not None
+
+    journal.start()
+    assert journal.close(timeout_seconds=2.0)
+
+    with sqlite3.connect(database_path) as con:
+        binding = con.execute(
+            """
+            SELECT
+                canonical_event_id,
+                canonical_attempt_id,
+                canonical_decision,
+                canonical_captured_ns
+            FROM population_bindings
+            WHERE slot_id = ?
+            """,
+            (slot.slot_id,),
+        ).fetchone()
+
+        events = con.execute(
+            """
+            SELECT
+                event_id,
+                attempt_id,
+                payload_json
+            FROM journal_events
+            WHERE event_type = 'evaluation_completed'
+            ORDER BY sequence
+            """
+        ).fetchall()
+
+    assert binding == (
+        canonical_refs.event_id,
+        "attempt-1",
+        "call",
+        signal.chain_state.captured_ns,
+    )
+
+    assert [row[0] for row in events] == [
+        canonical_refs.event_id,
+        retry_refs.event_id,
+    ]
+
+    assert [row[1] for row in events] == [
+        "attempt-1",
+        "attempt-2",
+    ]
+
+    retry_payload = json.loads(events[1][2])
+
+    assert (
+        retry_payload["population_status"]
+        == "same_decision_retry"
+    )
+    assert retry_payload["retry_ordinal"] == 1
+    assert retry_payload["canonical_decision"] == "call"
+    assert retry_payload["canonical_captured_ns"] == (
+        signal.chain_state.captured_ns
+    )
 
 
 def test_backward_wall_clock_response_is_preserved_without_rewrite(
@@ -666,6 +823,8 @@ def test_backward_wall_clock_response_is_preserved_without_rewrite(
         run_id="run-clock-anomaly",
         slot=slot,
         attempt_id="attempt-clock-anomaly",
+        population_status="canonical",
+        retry_ordinal=0,
         history=history,
         option_chain=option_chain,
         evaluated_option_chain=option_chain.snapshot,

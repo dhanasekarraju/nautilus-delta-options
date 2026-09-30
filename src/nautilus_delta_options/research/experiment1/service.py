@@ -25,9 +25,14 @@ from nautilus_delta_options.research.experiment1.models import (
     EvaluationSlot,
     JournalEventType,
 )
+from nautilus_delta_options.research.experiment1.population import (
+    PopulationStatus,
+    build_canonical_population_statement,
+)
 from nautilus_delta_options.signals.v34 import (
     V34ChainState,
     V34Config,
+    V34Decision,
     V34ShadowSignal,
 )
 
@@ -56,10 +61,14 @@ def enqueue_completed_evaluation(
     option_chain: CapturedOptionChainSnapshot,
     evaluated_option_chain: DeltaOptionChainSnapshot,
     signal: V34ShadowSignal,
+    population_status: PopulationStatus,
+    retry_ordinal: int,
     previous_chain: V34ChainState | None,
     config: V34Config,
     as_of: date,
     event_time_utc_ns: int,
+    canonical_decision: V34Decision | None = None,
+    canonical_captured_ns: int | None = None,
     monotonic_elapsed_ns: int | None = None,
 ) -> EvaluationEvidenceRefs | None:
     """Persist one successful evaluation as one atomic journal envelope."""
@@ -73,10 +82,14 @@ def enqueue_completed_evaluation(
         option_chain=option_chain,
         evaluated_option_chain=evaluated_option_chain,
         signal=signal,
+        population_status=population_status,
+        retry_ordinal=retry_ordinal,
         previous_chain=previous_chain,
         config=config,
         as_of=as_of,
         event_time_utc_ns=event_time_utc_ns,
+        canonical_decision=canonical_decision,
+        canonical_captured_ns=canonical_captured_ns,
         monotonic_elapsed_ns=monotonic_elapsed_ns,
     )
 
@@ -96,10 +109,14 @@ def build_completed_evaluation_statements(
     option_chain: CapturedOptionChainSnapshot,
     evaluated_option_chain: DeltaOptionChainSnapshot,
     signal: V34ShadowSignal,
+    population_status: PopulationStatus,
+    retry_ordinal: int,
     previous_chain: V34ChainState | None,
     config: V34Config,
     as_of: date,
     event_time_utc_ns: int,
+    canonical_decision: V34Decision | None = None,
+    canonical_captured_ns: int | None = None,
     monotonic_elapsed_ns: int | None = None,
 ) -> tuple[tuple[JournalStatement, ...], EvaluationEvidenceRefs]:
     """Build the append-only SQL envelope for one completed evaluation."""
@@ -116,6 +133,17 @@ def build_completed_evaluation_statements(
         previous_chain=previous_chain,
         event_time_utc_ns=event_time_utc_ns,
         monotonic_elapsed_ns=monotonic_elapsed_ns,
+    )
+
+    (
+        effective_canonical_decision,
+        effective_canonical_captured_ns,
+    ) = _normalize_population_metadata(
+        signal=signal,
+        population_status=population_status,
+        retry_ordinal=retry_ordinal,
+        canonical_decision=canonical_decision,
+        canonical_captured_ns=canonical_captured_ns,
     )
 
     history_request_id = _stable_id(
@@ -308,6 +336,14 @@ def build_completed_evaluation_statements(
         ),
         "candle_input_count": len(observation_ids),
         "p0_observation_id": p0_observation_id,
+        "population_status": population_status,
+        "retry_ordinal": retry_ordinal,
+        "canonical_decision": (
+            effective_canonical_decision.value
+        ),
+        "canonical_captured_ns": (
+            effective_canonical_captured_ns
+        ),
     }
 
     payload_json = canonical_json(event_payload)
@@ -354,6 +390,20 @@ def build_completed_evaluation_statements(
         )
     )
 
+    if population_status == "canonical":
+        statements.append(
+            build_canonical_population_statement(
+                experiment_id=experiment_id,
+                run_id=run_id,
+                slot_id=slot.slot_id,
+                event_id=event_id,
+                attempt_id=attempt_id,
+                decision=effective_canonical_decision,
+                captured_ns=effective_canonical_captured_ns,
+                recorded_at_utc_ns=event_time_utc_ns,
+            )
+        )
+
     refs = EvaluationEvidenceRefs(
         event_id=event_id,
         history_request_id=history_request_id,
@@ -364,6 +414,91 @@ def build_completed_evaluation_statements(
     )
 
     return tuple(statements), refs
+
+
+
+def _normalize_population_metadata(
+    *,
+    signal: V34ShadowSignal,
+    population_status: PopulationStatus,
+    retry_ordinal: int,
+    canonical_decision: V34Decision | None,
+    canonical_captured_ns: int | None,
+) -> tuple[V34Decision, int]:
+    actual_decision = signal.decision
+    actual_captured_ns = signal.chain_state.captured_ns
+
+    if population_status not in (
+        "canonical",
+        "same_decision_retry",
+        "conflicting_retry",
+    ):
+        raise ValueError("unsupported population_status")
+
+    if retry_ordinal < 0:
+        raise ValueError("retry_ordinal cannot be negative")
+
+    if population_status == "canonical":
+        if retry_ordinal != 0:
+            raise ValueError(
+                "canonical evaluator return must have retry_ordinal 0"
+            )
+
+        if (
+            canonical_decision is not None
+            and canonical_decision is not actual_decision
+        ):
+            raise ValueError(
+                "canonical decision must match evaluator result"
+            )
+
+        if (
+            canonical_captured_ns is not None
+            and canonical_captured_ns != actual_captured_ns
+        ):
+            raise ValueError(
+                "canonical captured_ns must match evaluator result"
+            )
+
+        return actual_decision, actual_captured_ns
+
+    if retry_ordinal == 0:
+        raise ValueError(
+            "retry evaluator return must have retry_ordinal > 0"
+        )
+
+    if canonical_decision is None:
+        raise ValueError(
+            "retry requires canonical_decision"
+        )
+
+    if canonical_captured_ns is None:
+        raise ValueError(
+            "retry requires canonical_captured_ns"
+        )
+
+    if canonical_captured_ns <= 0:
+        raise ValueError(
+            "canonical_captured_ns must be positive"
+        )
+
+    if (
+        population_status == "same_decision_retry"
+        and canonical_decision is not actual_decision
+    ):
+        raise ValueError(
+            "same_decision_retry must match canonical decision"
+        )
+
+    if (
+        population_status == "conflicting_retry"
+        and canonical_decision is actual_decision
+    ):
+        raise ValueError(
+            "conflicting_retry must differ from canonical decision"
+        )
+
+    return canonical_decision, canonical_captured_ns
 
 
 def _validate_completed_evaluation(
