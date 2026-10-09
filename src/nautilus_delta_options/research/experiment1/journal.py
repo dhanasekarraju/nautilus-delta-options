@@ -62,14 +62,13 @@ class ExperimentJournal:
 
         self._database_path = Path(database_path)
         self._max_queue_bytes = max_queue_bytes
+        self._max_queue_items = max_queue_items
         self._batch_size = batch_size
         self._flush_interval_seconds = flush_interval_seconds
         self._busy_timeout_ms = busy_timeout_ms
         self._create_new = create_new
 
-        self._queue: queue.Queue[_WriteEnvelope | None] = queue.Queue(
-            maxsize=max_queue_items
-        )
+        self._queue: queue.Queue[_WriteEnvelope | None] = queue.Queue(maxsize=max_queue_items)
 
         self._state_lock = threading.Lock()
         self._thread: threading.Thread | None = None
@@ -95,9 +94,7 @@ class ExperimentJournal:
             if self._closed:
                 raise RuntimeError("journal is closed")
             if self._fatal_error is not None:
-                raise RuntimeError(
-                    f"journal has failed: {self._fatal_error}"
-                )
+                raise RuntimeError(f"journal has failed: {self._fatal_error}")
             if self._thread is not None:
                 return
 
@@ -124,24 +121,16 @@ class ExperimentJournal:
     ) -> bool:
         """Admit one atomic multi-statement evidence envelope."""
 
-        normalized = tuple(
-            (sql, tuple(params))
-            for sql, params in statements
-        )
+        normalized = tuple((sql, tuple(params)) for sql, params in statements)
 
         if not normalized:
-            raise ValueError(
-                "journal batch must contain at least one statement"
-            )
+            raise ValueError("journal batch must contain at least one statement")
 
         for sql, _params in normalized:
             if not sql.strip():
                 raise ValueError("sql must be non-empty")
 
-        estimated_bytes = sum(
-            _estimate_statement_bytes(sql, params)
-            for sql, params in normalized
-        )
+        estimated_bytes = sum(_estimate_statement_bytes(sql, params) for sql, params in normalized)
 
         envelope = _WriteEnvelope(
             statements=normalized,
@@ -154,8 +143,8 @@ class ExperimentJournal:
                 return False
 
             if (
-                self._queued_bytes + estimated_bytes
-                > self._max_queue_bytes
+                self._queued_bytes + estimated_bytes > self._max_queue_bytes
+                or self._accepted - self._written >= self._max_queue_items
             ):
                 self._rejected += 1
                 return False
@@ -179,6 +168,23 @@ class ExperimentJournal:
                 queued_bytes=self._queued_bytes,
                 fatal_error=self._fatal_error,
             )
+
+    def flush(self, timeout_seconds: float = 10.0) -> bool:
+        """Bounded acknowledgement of all envelopes accepted before this call."""
+        if timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be positive")
+        with self._state_lock:
+            target = self._accepted
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            stats = self.stats()
+            if stats.fatal_error is not None:
+                return False
+            if stats.written >= target:
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.005)
 
     def close(self, timeout_seconds: float = 10.0) -> bool:
         if timeout_seconds <= 0:
@@ -225,19 +231,14 @@ class ExperimentJournal:
         if self._database_path.exists():
             if self._create_new:
                 raise RuntimeError(
-                    "refusing to create Experiment 1 journal: "
-                    "database path already exists"
+                    "refusing to create Experiment 1 journal: database path already exists"
                 )
 
             if not self._database_path.is_file():
-                raise RuntimeError(
-                    "existing Experiment 1 journal path is not a file"
-                )
+                raise RuntimeError("existing Experiment 1 journal path is not a file")
 
             if self._database_path.stat().st_size == 0:
-                raise RuntimeError(
-                    "existing Experiment 1 journal database is empty"
-                )
+                raise RuntimeError("existing Experiment 1 journal database is empty")
 
             self._validate_existing_read_only(expectation)
             self._activate_existing_database(expectation)
@@ -245,8 +246,7 @@ class ExperimentJournal:
 
         if not self._create_new:
             raise FileNotFoundError(
-                "Experiment 1 journal database does not exist; "
-                "creation requires create_new=True"
+                "Experiment 1 journal database does not exist; creation requires create_new=True"
             )
 
         self._database_path.parent.mkdir(
@@ -291,9 +291,7 @@ class ExperimentJournal:
             )
 
             con.execute("PRAGMA foreign_keys = ON")
-            con.execute(
-                f"PRAGMA busy_timeout = {self._busy_timeout_ms}"
-            )
+            con.execute(f"PRAGMA busy_timeout = {self._busy_timeout_ms}")
             con.execute("PRAGMA journal_mode = WAL")
             con.execute("PRAGMA synchronous = FULL")
 
@@ -301,14 +299,15 @@ class ExperimentJournal:
         self,
         expectation: SchemaExpectation,
     ) -> None:
+        # Exclusive reservation: never create over a file that appeared after preflight.
+        with self._database_path.open("xb"):
+            pass
         with sqlite3.connect(
             self._database_path,
             timeout=self._busy_timeout_ms / 1000,
         ) as con:
             con.execute("PRAGMA foreign_keys = ON")
-            con.execute(
-                f"PRAGMA busy_timeout = {self._busy_timeout_ms}"
-            )
+            con.execute(f"PRAGMA busy_timeout = {self._busy_timeout_ms}")
 
             con.executescript(expectation.schema_sql)
 
@@ -336,9 +335,7 @@ class ExperimentJournal:
                 timeout=self._busy_timeout_ms / 1000,
             )
             con.execute("PRAGMA foreign_keys = ON")
-            con.execute(
-                f"PRAGMA busy_timeout = {self._busy_timeout_ms}"
-            )
+            con.execute(f"PRAGMA busy_timeout = {self._busy_timeout_ms}")
             con.execute("PRAGMA synchronous = FULL")
 
             stop_after_batch = False
@@ -350,13 +347,8 @@ class ExperimentJournal:
                     self._queue.task_done()
                     break
 
-                self._mark_dequeued(first)
-
                 batch = [first]
-                deadline = (
-                    time.monotonic()
-                    + self._flush_interval_seconds
-                )
+                deadline = time.monotonic() + self._flush_interval_seconds
 
                 while len(batch) < self._batch_size:
                     remaining = deadline - time.monotonic()
@@ -373,7 +365,6 @@ class ExperimentJournal:
                         stop_after_batch = True
                         break
 
-                    self._mark_dequeued(item)
                     batch.append(item)
 
                 try:
@@ -386,12 +377,16 @@ class ExperimentJournal:
                     con.commit()
                 except Exception:
                     con.rollback()
+                    for failed in batch:
+                        self._mark_dequeued(failed)
+                        self._queue.task_done()
                     raise
 
                 with self._state_lock:
                     self._written += len(batch)
 
                 for _item in batch:
+                    self._mark_dequeued(_item)
                     self._queue.task_done()
 
         except Exception as exc:

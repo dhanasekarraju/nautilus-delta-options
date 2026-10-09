@@ -164,6 +164,9 @@ CREATE TABLE journal_events (
     CHECK (
         event_type IN (
             'run_started',
+            'source_parse_completed',
+            'collection_diagnostic',
+            'source_parse_failed',
             'observer_cycle_started',
             'observer_cycle_completed',
             'observer_cycle_aborted',
@@ -582,3 +585,19 @@ BEGIN
     );
 END;
 
+
+CREATE TABLE raw_payloads (
+    sha256 TEXT PRIMARY KEY, codec TEXT NOT NULL CHECK(codec = 'zlib'), body BLOB NOT NULL
+);
+CREATE TABLE raw_observations (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    response_id TEXT NOT NULL UNIQUE,
+    experiment_id TEXT NOT NULL REFERENCES experiment_manifest(experiment_id),
+    run_id TEXT NOT NULL,
+    sha256 TEXT NOT NULL REFERENCES raw_payloads(sha256),
+    metadata_json TEXT NOT NULL
+);
+CREATE TRIGGER raw_payloads_no_update BEFORE UPDATE ON raw_payloads BEGIN SELECT RAISE(ABORT, 'raw_payloads is append-only'); END;
+CREATE TRIGGER raw_payloads_no_delete BEFORE DELETE ON raw_payloads BEGIN SELECT RAISE(ABORT, 'raw_payloads is append-only'); END;
+CREATE TRIGGER raw_observations_no_update BEFORE UPDATE ON raw_observations BEGIN SELECT RAISE(ABORT, 'raw_observations is append-only'); END;
+CREATE TRIGGER raw_observations_no_delete BEFORE DELETE ON raw_observations BEGIN SELECT RAISE(ABORT, 'raw_observations is append-only'); END;

@@ -8,7 +8,7 @@ from pathlib import Path
 
 _APPLICATION_ID = "nautilus-delta-options.experiment1.journal"
 _SQLITE_APPLICATION_ID = 0x45583131
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 _SERIALIZATION_VERSION = 1
 
 _INCOMPATIBLE_PREFIX = (

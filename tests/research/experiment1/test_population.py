@@ -399,7 +399,7 @@ def test_population_bindings_are_append_only(
             )
 
 
-def test_schema_version_is_two(
+def test_schema_version_is_three(
     tmp_path: Path,
 ) -> None:
     path = _database(tmp_path)
@@ -407,7 +407,7 @@ def test_schema_version_is_two(
     with sqlite3.connect(path) as con:
         assert con.execute(
             "PRAGMA user_version"
-        ).fetchone()[0] == 2
+        ).fetchone()[0] == 3
 
 
 def test_population_loader_reports_durable_evaluation_count(

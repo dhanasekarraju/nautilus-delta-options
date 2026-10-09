@@ -1,0 +1,33 @@
+name: nautilus-experiment1
+services:
+  observer:
+    profiles: [research]
+    build:
+      context: .
+      dockerfile: Dockerfile.experiment1
+      args:
+        EXPERIMENT1_BUILD_ID: ${EXPERIMENT1_BUILD_ID:?Supply reviewed immutable build ID}
+    image: nautilus-experiment1:${EXPERIMENT1_BUILD_ID:?Supply reviewed immutable build ID}
+    entrypoint: [python, -m, nautilus_delta_options.research.experiment1]
+    command: [--help]
+    user: '10002:10002'
+    read_only: true
+    init: true
+    restart: 'no'
+    stop_grace_period: 45s
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 512m
+    cpus: 0.50
+    pids_limit: 32
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    volumes:
+      - experiment1_data:/research-data
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: '3'
+volumes:
+  experiment1_data:

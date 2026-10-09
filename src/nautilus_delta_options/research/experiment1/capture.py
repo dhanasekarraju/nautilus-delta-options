@@ -7,7 +7,9 @@ import subprocess
 import sys
 import time
 import urllib.parse
-from dataclasses import dataclass
+import uuid
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from threading import Event
 from typing import cast
 
@@ -24,26 +26,39 @@ from nautilus_delta_options.delta.public_client import (
 _MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 
 _RAW_WORKER = """
-import sys, urllib.request
+import sys, json, urllib.request, urllib.error
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *args, **kwargs):
         raise ValueError("Public data redirects are not permitted")
-request = urllib.request.Request(
-    sys.argv[1],
-    headers={
-        "Accept": "application/json",
-        "User-Agent": "nautilus-delta-options/0.1",
-    },
-    method="GET",
-)
-with urllib.request.build_opener(NoRedirect).open(
-    request,
-    timeout=float(sys.argv[2]),
-) as response:
-    payload = response.read(8 * 1024 * 1024 + 1)
-    if len(payload) > 8 * 1024 * 1024:
-        raise ValueError("Public response exceeds size limit")
-    sys.stdout.buffer.write(payload)
+meta = {"complete": False, "status": None, "error": None}
+try:
+    request = urllib.request.Request(sys.argv[1], headers={
+        "Accept": "application/json", "User-Agent": "nautilus-delta-options/0.1"
+    }, method="GET")
+    try:
+        response = urllib.request.build_opener(NoRedirect).open(
+            request, timeout=float(sys.argv[2]))
+    except urllib.error.HTTPError as exc:
+        response = exc
+    with response:
+        meta["status"] = response.status
+        total = 0
+        while True:
+            chunk = response.read1(min(65536, 8 * 1024 * 1024 + 1 - total))
+            if not chunk:
+                meta["complete"] = True
+                break
+            sys.stdout.buffer.write(chunk)
+            sys.stdout.buffer.flush()
+            total += len(chunk)
+            if total > 8 * 1024 * 1024:
+                raise ValueError("Public response exceeds size limit")
+        if response.status != 200:
+            meta["error"] = "HTTP status " + str(response.status)
+except Exception as exc:
+    meta["error"] = type(exc).__name__ + ": " + str(exc)
+finally:
+    sys.stderr.write(json.dumps(meta))
 """
 
 
@@ -55,13 +70,14 @@ class RawPublicResponse:
     request_elapsed_ns: int
     body: bytes
     sha256: str
+    http_status: int | None = None
+    body_complete: bool = True
+    transport_error: str | None = None
+    capture_id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
     @property
     def clock_anomaly(self) -> bool:
-        return (
-            self.response_received_utc_ns
-            < self.request_started_utc_ns
-        )
+        return self.response_received_utc_ns < self.request_started_utc_ns
 
     def json_payload(self) -> object:
         return cast(object, json.loads(self.body))
@@ -72,88 +88,77 @@ def raw_delta_public_get(
     *,
     timeout: float,
     stop: Event | None = None,
+    on_response: Callable[[RawPublicResponse], None] | None = None,
 ) -> RawPublicResponse:
     """Fetch approved Delta public data while retaining exact response bytes."""
 
     _validate_delta_research_url(url)
 
     if not math.isfinite(timeout) or timeout <= 0:
-        raise ValueError(
-            "Public request timeout must be finite and positive"
-        )
+        raise ValueError("Public request timeout must be finite and positive")
 
     if stop is not None and stop.is_set():
-        raise RuntimeError(
-            "Public market-data request cancelled during shutdown"
-        )
+        raise RuntimeError("Public market-data request cancelled during shutdown")
 
     started_utc_ns = time.time_ns()
     started_monotonic_ns = time.monotonic_ns()
     deadline = time.monotonic() + timeout
 
     with subprocess.Popen(
-        [
-            sys.executable,
-            "-I",
-            "-c",
-            _RAW_WORKER,
-            url,
-            str(timeout),
-        ],
+        [sys.executable, "-I", "-c", _RAW_WORKER, url, str(timeout)],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     ) as process:
+        failure: Exception | None = None
         try:
             while True:
                 if stop is not None and stop.is_set():
-                    raise RuntimeError(
-                        "Public market-data request cancelled during shutdown"
-                    )
-
+                    raise RuntimeError("Public request cancelled during shutdown")
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise TimeoutError(
-                        "Public market-data deadline exceeded"
-                    )
-
+                    raise TimeoutError("Public market-data deadline exceeded")
                 try:
-                    output, error = process.communicate(
-                        timeout=min(remaining, 0.1)
-                    )
+                    output, error = process.communicate(timeout=min(remaining, 0.1))
                     break
                 except subprocess.TimeoutExpired:
                     continue
-
-            if process.returncode:
-                raise RuntimeError(
-                    "Public market-data request failed: "
-                    + error.decode(errors="replace")[-500:]
-                )
-
-            if len(output) > _MAX_RESPONSE_BYTES:
-                raise ValueError(
-                    "Public response exceeds size limit"
-                )
-
-            received_utc_ns = time.time_ns()
-            elapsed_ns = (
-                time.monotonic_ns()
-                - started_monotonic_ns
-            )
-
-            return RawPublicResponse(
-                url=url,
-                request_started_utc_ns=started_utc_ns,
-                response_received_utc_ns=received_utc_ns,
-                request_elapsed_ns=elapsed_ns,
-                body=output,
-                sha256=hashlib.sha256(output).hexdigest(),
-            )
-
+        except Exception as exc:
+            failure = exc
+            process.kill()
+            output, error = process.communicate()
         finally:
             if process.poll() is None:
                 process.kill()
                 process.communicate()
+        meta: dict[str, object] = {}
+        if error:
+            try:
+                decoded = json.loads(error)
+                if isinstance(decoded, dict):
+                    meta = decoded
+            except (ValueError, UnicodeError):
+                failure = failure or RuntimeError(error.decode(errors="replace")[-500:])
+        if process.returncode or meta.get("error") or len(output) > _MAX_RESPONSE_BYTES:
+            failure = failure or RuntimeError(
+                str(meta.get("error") or "Public response failed or exceeds size limit")
+            )
+        status = meta.get("status")
+        response = RawPublicResponse(
+            url=url,
+            request_started_utc_ns=started_utc_ns,
+            response_received_utc_ns=time.time_ns(),
+            request_elapsed_ns=time.monotonic_ns() - started_monotonic_ns,
+            body=output,
+            sha256=hashlib.sha256(output).hexdigest(),
+            http_status=status if isinstance(status, int) else None,
+            body_complete=bool(meta.get("complete", failure is None)),
+            transport_error=str(failure) if failure else None,
+        )
+        if on_response is not None:
+            on_response(response)
+        if failure is not None:
+            raise failure
+        return response
 
 
 def _validate_delta_research_url(url: str) -> None:
@@ -172,9 +177,7 @@ def _validate_delta_research_url(url: str) -> None:
         or parsed.port not in (None, 443)
         or parsed.path not in allowed_paths
     ):
-        raise ValueError(
-            "Only approved Delta public research endpoints are permitted"
-        )
+        raise ValueError("Only approved Delta public research endpoints are permitted")
 
 
 _DELTA_BASE_URL = "https://api.india.delta.exchange"
@@ -200,6 +203,7 @@ def fetch_captured_5m_candles(
     now_s: int | None = None,
     timeout: float = 20.0,
     stop: Event | None = None,
+    on_response: Callable[[RawPublicResponse], None] | None = None,
 ) -> CapturedHistorySnapshot:
     """Fetch raw Delta history and parse it with the frozen production parser."""
 
@@ -211,10 +215,7 @@ def fetch_captured_5m_candles(
         raise ValueError("now_s must be positive")
 
     symbol = f"{underlying}USD"
-    start_s = (
-        resolved_now_s
-        - (count + 8) * _FIVE_MINUTE_SECONDS
-    )
+    start_s = resolved_now_s - (count + 8) * _FIVE_MINUTE_SECONDS
 
     params = urllib.parse.urlencode(
         {
@@ -226,11 +227,15 @@ def fetch_captured_5m_candles(
     )
     url = f"{_DELTA_BASE_URL}/v2/history/candles?{params}"
 
-    response = raw_delta_public_get(
-        url,
-        timeout=timeout,
-        stop=stop,
-    )
+    if on_response is None:
+        response = raw_delta_public_get(url, timeout=timeout, stop=stop)
+    else:
+        response = raw_delta_public_get(
+            url,
+            timeout=timeout,
+            stop=stop,
+            on_response=on_response,
+        )
 
     candles = parse_history_candles_payload(
         response.json_payload(),
@@ -240,8 +245,7 @@ def fetch_captured_5m_candles(
 
     if len(candles) < count:
         raise ValueError(
-            f"Delta returned only {len(candles)} completed 5m candles; "
-            f"{count} required"
+            f"Delta returned only {len(candles)} completed 5m candles; {count} required"
         )
 
     snapshot = DeltaCandleSnapshot(
@@ -263,6 +267,7 @@ def fetch_captured_option_chain(
     *,
     timeout: float = 20.0,
     stop: Event | None = None,
+    on_response: Callable[[RawPublicResponse], None] | None = None,
 ) -> CapturedOptionChainSnapshot:
     """Fetch raw Delta option-chain data and use the frozen production parser."""
 
@@ -274,11 +279,15 @@ def fetch_captured_option_chain(
     )
     url = f"{_DELTA_BASE_URL}/v2/tickers?{params}"
 
-    response = raw_delta_public_get(
-        url,
-        timeout=timeout,
-        stop=stop,
-    )
+    if on_response is None:
+        response = raw_delta_public_get(url, timeout=timeout, stop=stop)
+    else:
+        response = raw_delta_public_get(
+            url,
+            timeout=timeout,
+            stop=stop,
+            on_response=on_response,
+        )
 
     snapshot = parse_option_chain_payload(
         response.json_payload(),

@@ -326,6 +326,8 @@ def build_completed_evaluation_statements(
         "config": asdict(config),
         "as_of": as_of.isoformat(),
         "captured_ns": signal.chain_state.captured_ns,
+        "transport_history_response_id": history.response.capture_id,
+        "transport_option_response_id": option_chain.response.capture_id,
         "history_response_id": history_response_id,
         "option_response_id": option_response_id,
         "option_rejected_records": list(

@@ -1,0 +1,25 @@
+FROM python:3.12-slim-bookworm AS application
+ARG EXPERIMENT1_BUILD_ID
+ENV EXPERIMENT1_BUILD_ID=${EXPERIMENT1_BUILD_ID} \
+    PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
+WORKDIR /app
+COPY pyproject.toml constraints-py312.txt ./
+COPY src ./src
+RUN pip install -c constraints-py312.txt . \
+    && groupadd --gid 10002 research \
+    && useradd --uid 10002 --gid research --no-create-home research \
+    && mkdir /research-data \
+    && chown research:research /research-data
+USER research
+ENTRYPOINT ["python", "-m", "nautilus_delta_options.research.experiment1"]
+CMD ["--help"]
+
+FROM application AS validation
+USER root
+COPY tests ./tests
+RUN pip install -c constraints-py312.txt '.[dev]' \
+    && python -m pytest tests/research/experiment1 -q \
+    && python -m ruff check src tests \
+    && python -m mypy src
+
+FROM application AS runtime
